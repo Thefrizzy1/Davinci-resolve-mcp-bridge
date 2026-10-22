@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 
-DEFAULT_REPO = "samuelgursky/davinci-resolve-mcp"
+DEFAULT_REPO = "Thefrizzy1/davinci-resolve-mcp-bridge"
 DEFAULT_INTERVAL_HOURS = 24.0
 DEFAULT_TIMEOUT_SECONDS = 3.0
 DEFAULT_SNOOZE_HOURS = 24.0

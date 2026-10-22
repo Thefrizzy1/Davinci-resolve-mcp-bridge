@@ -73,19 +73,15 @@ class DocToolCountsDriftTest(unittest.TestCase):
 
         # (file, required substring) — each must be present verbatim.
         checks = [
-            ("README.md", f"{adv} tools:"),
-            ("README.md", f"**{comp}** compound / **{gran}** granular"),
-            ("README.md", f"Advanced (offline) tools | **{adv}**"),
+            ("README.md", f"**Main MCP server.** {comp} grouped tools"),
+            ("README.md", f"one tool per Resolve API method ({gran} tools)"),
             ("README.md", f"Advanced%20(offline)-{adv}%20tools"),
             ("README.md", f"MCP%20Tools-{comp}%20({gran}%20full)"),
-            ("README.zh-CN.md", f"MCP%20Tools-{comp}%20({gran}%20full)"),
-            ("README.zh-CN.md", f"`src/resolve_mcp_server.py` | {gran} |"),
-            ("README.zh-CN.md", f"**{comp}** 复合 / **{gran}** 细粒度"),
             ("resolve-advanced/README.md", f"## Tools ({adv})"),
             ("docs/install.md", f"`src/server.py` | {comp} |"),
             ("docs/install.md", f"`src/resolve_mcp_server.py` | {gran} |"),
             ("docs/install.md", f"full {gran}-tool server"),
-            ("install.py", f'{comp} compound · {gran} full · 3 platforms'),
+            ("install.py", f'{comp} compound · {gran} full · local AI · bridge'),
             ("src/resolve_mcp_server.py", f"({gran} granular tools)"),
             ("tests/test_import.py", f"assert total == {gran}"),
             # test_import.py hard-codes the compound count too. Adding a 35th

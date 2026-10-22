@@ -4,13 +4,13 @@
   "description": "NPM bootstrapper for the DaVinci Resolve MCP Server.",
   "license": "MIT",
   "author": "Samuel Gursky <samgursky@gmail.com>",
-  "homepage": "https://github.com/samuelgursky/davinci-resolve-mcp#readme",
+  "homepage": "https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/samuelgursky/davinci-resolve-mcp.git"
+    "url": "git+https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/samuelgursky/davinci-resolve-mcp/issues"
+    "url": "https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge/issues"
   },
   "type": "module",
   "bin": {

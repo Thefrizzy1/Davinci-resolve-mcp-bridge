@@ -65,7 +65,7 @@ HTML = r"""<!doctype html>
     :root {
       color-scheme: dark;
 
-      /* Bradford Operations core tokens */
+      /* core tokens */
       --bg-base: #1a1a1a;
       --bg-elevated-1: #242424;
       --bg-elevated-2: #2d2d2d;
@@ -112,7 +112,7 @@ HTML = r"""<!doctype html>
       --lab-accent-primary: var(--accent-brand);
       --lab-playhead: var(--accent-brand);
 
-      /* Bradford Operations density tokens */
+      /* density tokens */
       --ops-text-label: 12px;
       --ops-text-body: 14px;
       --ops-text-ui: 14px;
@@ -4062,7 +4062,7 @@ HTML = r"""<!doctype html>
         <span class="version-number" id="versionNumber">…</span>
         <span class="version-dot" id="versionDot" aria-hidden="true"></span>
       </button>
-      <a class="nav-link github-icon-link" href="https://github.com/samuelgursky/davinci-resolve-mcp" target="_blank" rel="noreferrer" aria-label="GitHub Repository" title="GitHub Repository">
+      <a class="nav-link github-icon-link" href="https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge" target="_blank" rel="noreferrer" aria-label="GitHub Repository" title="GitHub Repository">
         <svg class="github-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"></path>
           <path d="M9 18c-4.51 2-5-2-7-2"></path>
@@ -5030,7 +5030,7 @@ HTML = r"""<!doctype html>
         <code id="updateModalCommandText" class="modal-command"></code>
       </div>
       <div class="modal-actions">
-        <a id="updateModalReleaseLink" class="secondary" href="https://github.com/samuelgursky/davinci-resolve-mcp/releases" target="_blank" rel="noreferrer" style="display:none">Release notes</a>
+        <a id="updateModalReleaseLink" class="secondary" href="https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge/releases" target="_blank" rel="noreferrer" style="display:none">Release notes</a>
         <button class="secondary" id="updateModalCancel" type="button">Close</button>
         <button class="secondary" id="updateModalCopy" type="button" style="display:none">Copy Command</button>
         <button id="updateModalApply" type="button" style="display:none">Update Now</button>
@@ -5038,11 +5038,11 @@ HTML = r"""<!doctype html>
     </div>
   </div>
   <footer class="lab-footer">
-    <div class="footer-credit">Developed by <a href="https://www.samuelgursky.com" target="_blank" rel="noreferrer">Samuel Gursky</a> for <a href="https://www.bradfordoperations.com" target="_blank" rel="noreferrer">Bradford Operations</a></div>
-    <div class="footer-notice">DaVinci Resolve is a trademark of Blackmagic Design Pty Ltd. Bradford Operations is not affiliated with, endorsed by, or sponsored by Blackmagic Design. All third-party trademarks are the property of their respective owners.</div>
+    <div class="footer-credit">Developed by <a href="https://www.samuelgursky.com" target="_blank" rel="noreferrer">Samuel Gursky</a></div>
+    <div class="footer-notice">DaVinci Resolve is a trademark of Blackmagic Design Pty Ltd. This project is not affiliated with, endorsed by, or sponsored by Blackmagic Design. All third-party trademarks are the property of their respective owners.</div>
     <div class="footer-links">
       <span class="footer-open-source">Open source. Patches, features, and community contributions welcome.</span>
-      <a class="github-icon-link" href="https://github.com/samuelgursky/davinci-resolve-mcp" target="_blank" rel="noreferrer" aria-label="GitHub Repository" title="GitHub Repository">
+      <a class="github-icon-link" href="https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge" target="_blank" rel="noreferrer" aria-label="GitHub Repository" title="GitHub Repository">
         <svg class="github-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"></path>
           <path d="M9 18c-4.51 2-5-2-7-2"></path>
@@ -6620,7 +6620,7 @@ HTML = r"""<!doctype html>
         releaseLink.href = state.updateStatus.release_url;
         releaseLink.style.display = '';
       } else if (hasUpdate) {
-        releaseLink.href = 'https://github.com/samuelgursky/davinci-resolve-mcp/releases';
+        releaseLink.href = 'https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge/releases';
         releaseLink.style.display = '';
       } else {
         releaseLink.style.display = 'none';

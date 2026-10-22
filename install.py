@@ -438,6 +438,14 @@ def antigravity_config():
 
 MCP_CLIENTS = [
     {
+        "id": "lmstudio",
+        "name": "LM Studio",
+        # Same file on every platform: ~/.lmstudio/mcp.json (Cursor-style schema).
+        "get_path": lambda: home() / ".lmstudio" / "mcp.json",
+        "config_key": "mcpServers",
+        "notes": "Run local models (pair with local_ai for Whisper + vision)",
+    },
+    {
         "id": "antigravity",
         "name": "Antigravity",
         "get_path": antigravity_config,
@@ -1443,6 +1451,56 @@ def install_dependencies(venv_path, project_dir):
             check=True, capture_output=True
         )
 
+def lmstudio_detected():
+    """True when LM Studio has been run on this machine (it creates ~/.lmstudio)."""
+    return (home() / ".lmstudio").is_dir()
+
+
+def install_local_ai_extras(python_path, project_dir, dry_run=False):
+    """pip-install requirements-local-ai.txt (faster-whisper) into the chosen Python."""
+    req_file = project_dir / "requirements-local-ai.txt"
+    if dry_run:
+        return True, f"would install {req_file.name}"
+    try:
+        subprocess.run(
+            [str(python_path), "-m", "pip", "install", "-q", "-r", str(req_file)],
+            check=True, capture_output=True, text=True,
+        )
+        return True, "faster-whisper installed"
+    except subprocess.CalledProcessError as exc:
+        tail = (exc.stderr or exc.stdout or "").strip().splitlines()[-1:] or ["pip failed"]
+        return False, tail[0]
+
+
+def install_bridge(project_dir, dry_run=False):
+    """Always place the in-app bridge into Resolve's Scripts folders.
+
+    Harmless on Studio (external scripting is still tried first) and the only
+    route on the free edition. Returns (ok, summary_lines).
+    """
+    if dry_run:
+        return True, ["would install resolve_bridge into Resolve's Scripts/Utility folders"]
+    import importlib.util as _ilu
+
+    spec = _ilu.spec_from_file_location(
+        "install_resolve_bridge", project_dir / "scripts" / "install_resolve_bridge.py")
+    module = _ilu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        result = module.install(probe_only=False, port=module.DEFAULT_PORT, rotate=False)
+    except SystemExit as exc:  # the script reports "no Scripts folder" this way
+        return False, [str(exc)]
+    except Exception as exc:  # never let the bridge sink the main install
+        return False, [f"{type(exc).__name__}: {exc}"]
+    launchers = [p for p in result.get("installed", []) if p.endswith("resolve_bridge.py")
+                 and ".davinci_mcp_runtime" not in p]
+    lines = [f"{len(launchers)} Scripts folder(s)"] + [f"  {p}" for p in launchers]
+    if not result.get("python", {}).get("resolve_will_list_python_scripts", True):
+        lines.append("WARNING: " + str(result["python"].get("advice", "Resolve may not see Python")))
+    lines += [f"WARNING: {w}" for w in result.get("warnings", [])]
+    return True, lines
+
+
 # ─── Connection Verification ─────────────────────────────────────────────────
 
 #: Windows surfaces a hard access violation (STATUS_ACCESS_VIOLATION) as a
@@ -1590,7 +1648,7 @@ def verify_resolve_connection(python_path, api_path, lib_path):
 
 def print_banner():
     title = f"DaVinci Resolve MCP Server — Installer v{VERSION}"
-    subtitle = "37 compound · 390 full · 3 platforms"
+    subtitle = "38 compound · 390 full · local AI · bridge"
     print()
     print(bold("  ╔══════════════════════════════════════════════════════╗"))
     print(bold(f"  ║{title:^54}║"))
@@ -2117,6 +2175,7 @@ def main():
         epilog=textwrap.dedent("""\
             Examples:
               python install.py                            Interactive mode
+              python install.py --lmstudio --local-ai      LM Studio + Whisper, no prompts
               python install.py --clients all              Configure all clients
               python install.py --clients cursor,claude-desktop
               python install.py --clients manual           Just print the config
@@ -2129,6 +2188,18 @@ def main():
     parser.add_argument(
         "--clients", type=str, default=None,
         help="Comma-separated client IDs, or 'all' / 'manual' (skip interactive prompt)"
+    )
+    parser.add_argument(
+        "--lmstudio", action="store_true",
+        help="Install straight into LM Studio (~/.lmstudio/mcp.json); same as adding 'lmstudio' to --clients"
+    )
+    parser.add_argument(
+        "--local-ai", action="store_true",
+        help="Install the local AI extras (faster-whisper) without asking"
+    )
+    parser.add_argument(
+        "--no-local-ai", action="store_true",
+        help="Skip the local AI extras without asking"
     )
     parser.add_argument(
         "--no-venv", action="store_true",
@@ -2162,6 +2233,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.lmstudio:
+        args.clients = "lmstudio" if not args.clients else f"lmstudio,{args.clients}"
     interactive = args.clients is None
 
     # ── Banner ──
@@ -2169,7 +2242,7 @@ def main():
         print_banner()
 
     project_dir = Path(__file__).resolve().parent
-    total_steps = 5
+    total_steps = 7
 
     if args.clear_update_preferences:
         clear_update_prompt_preferences(project_dir)
@@ -2335,11 +2408,50 @@ def main():
         print(f"  Node deps: {yellow(node_deps)}")
 
     # ══════════════════════════════════════════════════════════════════════
-    # STEP 4: Configure MCP Clients
+    # STEP 4: Resolve Bridge (always installed)
     # ══════════════════════════════════════════════════════════════════════
 
     if interactive:
-        print_step(4, total_steps, "MCP Client Configuration")
+        print_step(4, total_steps, "Resolve In-App Bridge")
+
+    bridge_ok, bridge_lines = install_bridge(project_dir, dry_run=args.dry_run)
+    if bridge_ok:
+        print(f"  Bridge:    {green('Installed')} {dim(bridge_lines[0])}")
+        for line in bridge_lines[1:]:
+            print(f"  {yellow(line) if line.startswith('WARNING') else dim(line)}")
+        print(f"  {dim('Free edition: restart Resolve, open a project, Workspace > Scripts > resolve_bridge')}")
+    else:
+        print(f"  Bridge:    {yellow('Not installed')} {dim(bridge_lines[0])}")
+        print(f"  {dim('Retry later with: python scripts/install_resolve_bridge.py')}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STEP 5: Local AI extras (Whisper)
+    # ══════════════════════════════════════════════════════════════════════
+
+    if interactive:
+        print_step(5, total_steps, "Local AI (Whisper transcription + vision)")
+
+    if args.no_local_ai:
+        want_local_ai = False
+    elif args.local_ai:
+        want_local_ai = True
+    elif interactive:
+        print(f"  {dim('Adds faster-whisper (~100 MB + model on first use). Vision uses LM Studio/Ollama.')}")
+        want_local_ai = prompt_yes_no("Install local AI extras?")
+    else:
+        want_local_ai = False
+    if want_local_ai:
+        ok, message = install_local_ai_extras(python_path, project_dir, dry_run=args.dry_run)
+        print(f"  Whisper:   {green(message) if ok else yellow(message)}")
+    else:
+        print(f"  Whisper:   {dim('skipped (pip install -r requirements-local-ai.txt any time)')}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STEP 6: Configure MCP Clients
+    # ══════════════════════════════════════════════════════════════════════
+
+    if interactive:
+        print_step(6, total_steps, "MCP Client Configuration")
 
     # Determine which clients to configure
     if args.clients:
@@ -2350,7 +2462,11 @@ def main():
         else:
             selected_ids = [s.strip() for s in args.clients.split(",")]
     elif interactive:
-        selected_ids = prompt_clients()
+        selected_ids = []
+        if lmstudio_detected() or prompt_yes_no("LM Studio not detected. Configure it anyway?", default=False):
+            if prompt_yes_no("Install straight into LM Studio?"):
+                selected_ids.append("lmstudio")
+        selected_ids += [c for c in prompt_clients() if c not in selected_ids]
     else:
         selected_ids = []
 
@@ -2393,7 +2509,7 @@ def main():
         env_preview = build_server_env(python_path, api_path, lib_path)
         print(f"\n  {bold('Manual Configuration')}")
         print(f"  {'─' * 50}")
-        print(f"\n  {cyan('Standard format')} (Claude Desktop, Cursor, Windsurf, Cline, Roo Code, Continue):")
+        print(f"\n  {cyan('Standard format')} (LM Studio, Claude Desktop, Cursor, Windsurf, Cline, Roo Code, Continue):")
         print()
         for line in standard.split("\n"):
             print(f"    {line}")
@@ -2424,11 +2540,11 @@ def main():
         print(f"  {dim('No clients selected — skipping configuration')}")
 
     # ══════════════════════════════════════════════════════════════════════
-    # STEP 5: Verify Connection
+    # STEP 7: Verify Connection
     # ══════════════════════════════════════════════════════════════════════
 
     if interactive:
-        print_step(5, total_steps, "Verification")
+        print_step(7, total_steps, "Verification")
 
     verification_failed = False
     if api_path:

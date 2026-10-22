@@ -1579,6 +1579,17 @@ TOOL_INSTALL: Dict[str, Dict[str, Any]] = {
             "alternative backend."
         ),
     },
+    "faster_whisper": {
+        "label": "faster-whisper",
+        "bundle": "transcription",
+        "required_for": ["transcription (local, CPU or CUDA, no ffmpeg needed)"],
+        "commands": {
+            "all": "venv/bin/pip install -r requirements-local-ai.txt",
+            "windows": "venv\\Scripts\\pip install -r requirements-local-ai.txt",
+        },
+        "verify": "python -c 'import faster_whisper'",
+        "notes": "Default local backend for this fork. Installed by install.py when you accept the local AI extras.",
+    },
     "whisper_cpp": {
         "label": "whisper.cpp",
         "bundle": "transcription",
@@ -1832,6 +1843,7 @@ def detect_capabilities(env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     # openai-whisper Python CLI invoked as `whisper`.)
     whisper_cpp = shutil.which("whisper-cli") or shutil.which("whisper-cpp")
     mlx_whisper = importlib.util.find_spec("mlx_whisper") is not None
+    faster_whisper = importlib.util.find_spec("faster_whisper") is not None
     cv2 = importlib.util.find_spec("cv2") is not None
     provider = env.get("DAVINCI_RESOLVE_MCP_VISION_PROVIDER")
     http_transcription = _detect_http_transcription_providers(env)
@@ -1867,6 +1879,7 @@ def detect_capabilities(env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         "tools": {
             "ffprobe": _tool_entry("ffprobe", bool(shutil.which("ffprobe")), {"path": shutil.which("ffprobe")}),
             "ffmpeg": _tool_entry("ffmpeg", bool(shutil.which("ffmpeg")), {"path": shutil.which("ffmpeg")}),
+            "faster_whisper": _tool_entry("faster_whisper", bool(faster_whisper), {"python_module": "faster_whisper"}),
             "whisper_cli": _tool_entry("whisper_cli", bool(whisper_cli), {"path": whisper_cli}),
             "whisper_cpp": _tool_entry("whisper_cpp", bool(whisper_cpp), {"path": whisper_cpp}),
             "mlx_whisper": _tool_entry("mlx_whisper", bool(mlx_whisper), {"python_module": "mlx_whisper"}),
@@ -1890,13 +1903,14 @@ def detect_capabilities(env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         },
         "embeddings": embedding_caps,
         "transcription": {
-            "available": bool(http_transcription["available"] or whisper_cli or whisper_cpp or mlx_whisper),
+            "available": bool(http_transcription["available"] or faster_whisper or whisper_cli or whisper_cpp or mlx_whisper),
             "backends": [
                 provider["backend"]
                 for provider in http_transcription["providers"]
                 if provider["available"]
             ] + [
                 name for name, available in (
+                    ("faster_whisper", bool(faster_whisper)),
                     ("whisper_cli", bool(whisper_cli)),
                     ("whisper_cpp", bool(whisper_cpp)),
                     ("mlx_whisper", bool(mlx_whisper)),
@@ -4299,6 +4313,23 @@ def _transcribe_with_whisper_cli(path: str, artifacts: Dict[str, Any], transcrip
     return payload
 
 
+def _transcribe_with_faster_whisper(path: str, artifacts: Dict[str, Any], transcription: Dict[str, Any]) -> Dict[str, Any]:
+    from src.utils import local_ai as _local_ai
+
+    try:
+        raw = _local_ai.transcribe(
+            path,
+            model=transcription.get("model"),
+            language=transcription.get("language"),
+            word_timestamps=_coerce_bool(transcription.get("word_timestamps", True), default=True),
+        )
+    except _local_ai.LocalAIError as exc:
+        return {"success": False, "status": "skipped", "backend": "faster_whisper", "reason": str(exc)}
+    payload = _normalize_transcript_payload(raw, "faster_whisper", transcription.get("language"))
+    _write_transcript_artifacts(payload, artifacts)
+    return payload
+
+
 def _transcribe_with_mlx_whisper(path: str, artifacts: Dict[str, Any], transcription: Dict[str, Any]) -> Dict[str, Any]:
     try:
         import mlx_whisper  # type: ignore[import-not-found]
@@ -4461,7 +4492,7 @@ def _transcribe(path: str, artifacts: Dict[str, Any], options: Dict[str, Any], c
                     "reason": f"HTTP transcription provider '{provider_id}' is not configured.",
                 }
             return _transcribe_with_http_provider(path, artifacts, transcription, provider)
-        if backend in {"whisper_cli", "mlx_whisper"}:
+        if backend in {"whisper_cli", "mlx_whisper", "faster_whisper"}:
             if not _coerce_bool(transcription.get("allow_model_download"), default=False):
                 return {
                     "success": False,
@@ -4471,6 +4502,8 @@ def _transcribe(path: str, artifacts: Dict[str, Any], options: Dict[str, Any], c
                 }
             if backend == "whisper_cli":
                 return _transcribe_with_whisper_cli(path, artifacts, transcription)
+            if backend == "faster_whisper":
+                return _transcribe_with_faster_whisper(path, artifacts, transcription)
             return _transcribe_with_mlx_whisper(path, artifacts, transcription)
         return {"success": False, "status": "fallthrough", "backend": backend}
 
@@ -4503,7 +4536,7 @@ def _transcribe(path: str, artifacts: Dict[str, Any], options: Dict[str, Any], c
     if result is not None and result.get("status") != "fallthrough":
         return result
     if (
-        backend in {"mock", "local_mock", "whisper_cli", "mlx_whisper"}
+        backend in {"mock", "local_mock", "whisper_cli", "mlx_whisper", "faster_whisper"}
         or (
             isinstance(backend, str)
             and backend.startswith(HTTP_TRANSCRIPTION_BACKEND_PREFIX)

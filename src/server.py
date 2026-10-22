@@ -2,7 +2,7 @@
 """
 DaVinci Resolve MCP Server (Compound Tools)
 
-37 compound tools covering 100% of the DaVinci Resolve Scripting API (336 methods)
+38 compound tools covering 100% of the DaVinci Resolve Scripting API (336 methods)
 plus Fusion Fuse, DCTL, and Resolve-page Script authoring tools.
 Each tool groups related operations via an 'action' parameter.
 
@@ -405,11 +405,14 @@ def davinci_resolve_workflow() -> str:
     return """Use this DaVinci Resolve MCP server as a guarded post-production control surface.
 
 Core pattern:
-- Prefer the 37 compound tools and their action names over raw scripting.
+- Prefer the 38 compound tools and their action names over raw scripting.
 - Start by probing state: resolve_control.get_version/get_page, project_manager.get_current, timeline.get_current, and media_pool.probe_media_pool.
 - Before mutating timelines, media pools, render settings, grades, projects, databases, or extensions, prefer the matching probe, capabilities, boundary_report, safe_*, or dry_run action when one exists.
 - Preserve source media integrity. Never transcode, proxy, rewrite, move, rename, or create derivatives of source media unless the user explicitly asks. Analysis output belongs in sidecars or analysis directories.
 - Do not silently downgrade media analysis. Source-safe does not mean no visuals, no transcription, no persistence, no metadata, or no markers. For Resolve-target media analysis, keep visual analysis, transcription, persisted artifacts, metadata writeback, and Media Pool marker writeback enabled unless the user explicitly opts out. Vision uses host_chat_paths by default: analyze actions return absolute frame_paths in a deferred payload; you must read those frames as images and call media_analysis(action="commit_vision", ...) to finalize. Not completing commit_vision leaves the analysis in pending_host_vision_analysis — that is a failure mode, not a success.
+
+Local models (LM Studio, Ollama, or any model that cannot open image or audio files itself):
+- Use local_ai instead of host_chat_paths vision: local_ai(action="describe", params={"clip_name": ...}) returns a plain-text description from the local vision model, and local_ai(action="transcribe", ...) returns the spoken text. local_ai(action="status") says what is installed.
 
 Visual feedback:
 - To see what Resolve renders — grade, Fusion, titles — use timeline_frame(action="capture") when the client can display MCP images. It takes an optional timecode/frame, max_width to bound context cost, and quality="full" for a full-resolution frame; it restores the page, playhead, and timeline afterwards. Look at the frame instead of inferring from metadata.
@@ -33640,6 +33643,149 @@ def knowledge(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TOOL: local_ai — quick Whisper transcription + local vision (LM Studio / Ollama)
+#
+# Everything runs on this machine. Built for local models that cannot read image
+# files or audio themselves: the server listens/looks and hands back plain text.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_LOCAL_AI_ACTIONS = ["status", "transcribe", "describe", "analyze"]
+
+
+def _local_ai_clip_by_name(name: str):
+    """Find a Media Pool clip by exact name (case-insensitive) anywhere in the pool."""
+    _, _, mp, err = _get_mp()
+    if err:
+        return None, err
+    wanted = str(name).strip().lower()
+    stack = [mp.GetRootFolder()]
+    while stack:
+        folder = stack.pop()
+        for clip in (folder.GetClipList() or []):
+            if str(clip.GetName() or "").strip().lower() == wanted:
+                return clip, None
+        stack.extend(folder.GetSubFolderList() or [])
+    return None, _err(f"No Media Pool clip named {name!r}", code="CLIP_NOT_FOUND", category="invalid_input",
+                      remediation="Pass the exact clip name shown in the Media Pool, or a file path.")
+
+
+def _local_ai_resolve_target(p) -> tuple:
+    """Return (file_path, clip_or_None, error) from params path | clip_id | clip_name."""
+    path = p.get("path") or p.get("file_path")
+    if path:
+        return os.path.abspath(os.path.expanduser(str(path))), None, None
+    clip = None
+    if p.get("clip_id"):
+        _, _, mp, err = _get_mp()
+        if err:
+            return None, None, err
+        clip = _find_clip(mp.GetRootFolder(), str(p["clip_id"]))
+        if clip is None:
+            return None, None, _err(f"Clip not found: {p['clip_id']}", code="CLIP_NOT_FOUND", category="invalid_input")
+    elif p.get("clip_name"):
+        clip, err = _local_ai_clip_by_name(p["clip_name"])
+        if err:
+            return None, None, err
+    else:
+        return None, None, _err("Pass one of: path, clip_id, clip_name", code="MISSING_TARGET", category="invalid_input")
+    file_path = clip.GetClipProperty("File Path")
+    if not file_path:
+        return None, None, _err("That clip has no file on disk (generator, compound or offline clip)",
+                                code="NO_FILE_PATH", category="precondition")
+    return file_path, clip, None
+
+
+def _local_ai_add_markers(clip, segments, color: str) -> int:
+    try:
+        fps = float(clip.GetClipProperty("FPS") or 24.0)
+    except (TypeError, ValueError):
+        fps = 24.0
+    added = 0
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        frame = int(round(seg["start"] * fps))
+        duration = max(1, int(round((seg["end"] - seg["start"]) * fps)))
+        if clip.AddMarker(frame, color, text[:60], text, duration, "local_ai_transcript"):
+            added += 1
+    return added
+
+
+@mcp.tool()
+@_guard_missing_params
+def local_ai(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Local Whisper transcription and local vision — no cloud, no keys, no cost.
+
+    Target any action with ONE of: path (file on disk), clip_id, or clip_name (Media Pool).
+
+    Actions:
+      status() -> {transcription, vision, frame_extraction}  — what is installed/running.
+      transcribe(target, model?, language?, word_timestamps?, translate?, write_srt?,
+                 import_srt?, add_markers?, marker_color?) -> {text, segments, srt_path?}
+        model: tiny|base|small|medium|large-v3|turbo (default base). translate=true -> English.
+        write_srt=true writes <file>.srt next to the media (or pass srt_path).
+        import_srt=true also imports that SRT into the Media Pool.
+        add_markers=true (clip targets) drops one marker per spoken segment on the clip.
+      describe(target, prompt?, frames?, times?, model?) -> {description, frame_times}
+        Samples frames (default 4) and asks the vision model loaded in LM Studio/Ollama.
+      analyze(target, ...) -> {transcript, vision}  — both of the above in one call.
+
+    Setup: requirements-local-ai.txt for Whisper; LM Studio server (port 1234) or
+    Ollama with a vision model (Qwen2.5-VL, Gemma 3, LLaVA…) for describe.
+    """
+    from src.utils import local_ai as _local_ai
+
+    p = _params(params)
+    if action == "status":
+        return _local_ai.status()
+    if action not in _LOCAL_AI_ACTIONS:
+        return _unknown(action, _LOCAL_AI_ACTIONS)
+
+    file_path, clip, err = _local_ai_resolve_target(p)
+    if err:
+        return err
+    out: Dict[str, Any] = {"success": True, "file_path": file_path}
+    try:
+        if action in ("transcribe", "analyze"):
+            srt_path = p.get("srt_path")
+            if not srt_path and (_coerce_bool(p.get("write_srt")) or _coerce_bool(p.get("import_srt"))):
+                srt_path = os.path.splitext(file_path)[0] + ".srt"
+            transcript = _local_ai.transcribe(
+                file_path,
+                model=p.get("model") if action == "transcribe" else p.get("whisper_model"),
+                language=p.get("language"),
+                word_timestamps=_coerce_bool(p.get("word_timestamps")),
+                task="translate" if _coerce_bool(p.get("translate")) else "transcribe",
+                srt_path=srt_path,
+            )
+            if _coerce_bool(p.get("import_srt")) and transcript.get("srt_path"):
+                _, _, mp, mp_err = _get_mp()
+                imported = mp.ImportMedia([transcript["srt_path"]]) if not mp_err else None
+                transcript["srt_imported"] = bool(imported)
+            if _coerce_bool(p.get("add_markers")) and clip is not None:
+                transcript["markers_added"] = _local_ai_add_markers(
+                    clip, transcript["segments"], str(p.get("marker_color") or "Blue"))
+            out["transcript" if action == "analyze" else "result"] = transcript
+        if action in ("describe", "analyze"):
+            vision = _local_ai.describe(
+                file_path,
+                prompt=p.get("prompt"),
+                frames=int(p.get("frames", 4)),
+                times=p.get("times"),
+                model=p.get("model") if action == "describe" else p.get("vision_model"),
+            )
+            out["vision" if action == "analyze" else "result"] = vision
+    except _local_ai.LocalAIError as exc:
+        return _err(str(exc), code="LOCAL_AI_UNAVAILABLE", category="precondition")
+    if "result" in out:
+        result = out.pop("result")
+        result["file_path"] = file_path
+        return result
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MCP Resources — agentic-flow improvement E1
 #
 # Resources are read-only state surfaces that hosts can pull WITHOUT consuming
@@ -33946,5 +34092,5 @@ if __name__ == "__main__":
         logger.error(f"Unknown --transport {transport!r}; use stdio|sse|streamable-http")
         sys.exit(2)
 
-    logger.info("Starting DaVinci Resolve MCP Server (37 compound tools)")
+    logger.info("Starting DaVinci Resolve MCP Server (38 compound tools)")
     run_fastmcp_stdio(mcp)

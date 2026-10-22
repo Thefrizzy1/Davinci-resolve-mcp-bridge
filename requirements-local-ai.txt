@@ -1,0 +1,9 @@
+# Optional local AI extras (installed by install.py when you say yes to "local AI").
+#
+# faster-whisper — local Whisper transcription (CTranslate2). Decodes audio/video
+# itself via PyAV, so ffmpeg is optional. Model weights download on first use
+# (base ≈ 150 MB) into the Hugging Face cache. Uses CUDA automatically if present.
+#
+# Vision needs no Python package: it talks to LM Studio / Ollama over HTTP.
+# ffmpeg on PATH is recommended for pulling frames from video (opencv-python works too).
+faster-whisper>=1.1

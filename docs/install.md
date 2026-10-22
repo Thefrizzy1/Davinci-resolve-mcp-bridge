@@ -58,23 +58,16 @@ Validated live coverage is based on **DaVinci Resolve 19.1.3 Studio** for the or
 ## Quick Start
 
 ```bash
-# Make sure DaVinci Resolve Studio is running, then:
-npx davinci-resolve-mcp setup
+git clone https://github.com/Thefrizzy1/davinci-resolve-mcp-bridge.git
+cd davinci-resolve-mcp-bridge
+python install.py                    # interactive
+python install.py --lmstudio --local-ai   # LM Studio + Whisper, no prompts
 ```
 
-The npm launcher installs a managed copy in your user application-data directory
-and then runs the universal Python installer from there. MCP client configs point
-directly at the managed Python virtual environment and `src/server.py`, so Node
-is not required after setup.
-
-For source installs:
-
-```bash
-git clone https://github.com/samuelgursky/davinci-resolve-mcp.git
-cd davinci-resolve-mcp
-
-python install.py
-```
+This fork's installer always installs the in-app Resolve bridge, offers the local
+AI extras (`requirements-local-ai.txt`), and offers to write LM Studio's
+`~/.lmstudio/mcp.json` directly. (`npx davinci-resolve-mcp setup` installs the
+*upstream* package from npm, not this fork.)
 
 The universal installer auto-detects your platform, finds your DaVinci Resolve installation, creates a virtual environment, and configures your MCP client — all in one step.
 
@@ -86,6 +79,7 @@ The installer can automatically configure any of these clients:
 
 | Client | Config Written To |
 |--------|-------------------|
+| LM Studio | `~/.lmstudio/mcp.json` (all platforms) |
 | Antigravity (Google) | `~/.gemini/config/mcp_config.json`, or `~/.gemini/antigravity/mcp_config.json` if that file already exists (all platforms) |
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS); `%APPDATA%\Claude\claude_desktop_config.json` (Windows, see MSIX note below) |
 | Claude Code | `.mcp.json` (project root) |
@@ -143,7 +137,7 @@ The MCP server comes in two modes:
 
 | Mode | File | Tools | Best For |
 |------|------|-------|----------|
-| **Compound** (default) | `src/server.py` | 37 | Most users — fast, clean, low context usage |
+| **Compound** (default) | `src/server.py` | 38 | Most users — fast, clean, low context usage |
 | **Full** | `src/resolve_mcp_server.py` | 390 | Power users who want one tool per API method |
 
 The compound server's `timeline_item` tool includes dedicated actions for common workflows:

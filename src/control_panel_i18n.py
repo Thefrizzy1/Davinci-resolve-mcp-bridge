@@ -404,7 +404,7 @@ ZH_CN_TRANSLATIONS = {
     "Developed by": "开发者：",
     "for": "服务于",
     "Open source. Patches, features, and community contributions welcome.": "开源项目，欢迎补丁、新功能和社区贡献。",
-    "DaVinci Resolve is a trademark of Blackmagic Design Pty Ltd. Bradford Operations is not affiliated with, endorsed by, or sponsored by Blackmagic Design. All third-party trademarks are the property of their respective owners.": "DaVinci Resolve 是 Blackmagic Design Pty Ltd. 的商标。Bradford Operations 与 Blackmagic Design 无隶属、认可或赞助关系。所有第三方商标均归各自所有者所有。",
+    "DaVinci Resolve is a trademark of Blackmagic Design Pty Ltd. This project is not affiliated with, endorsed by, or sponsored by Blackmagic Design. All third-party trademarks are the property of their respective owners.": "DaVinci Resolve 是 Blackmagic Design Pty Ltd. 的商标。本项目与 Blackmagic Design 无隶属、认可或赞助关系。所有第三方商标均归各自所有者所有。",
     "and": "和",
     "not": "不",
     "with": "且",

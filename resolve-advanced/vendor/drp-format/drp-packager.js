@@ -29,7 +29,7 @@ async function packageDRP(projectXML, options = {}) {
     const metadata = {
       projectName,
       exportedAt: new Date().toISOString(),
-      exportedBy: 'Bradford Operations',
+      exportedBy: 'davinci-resolve-mcp',
       version: '1.0'
     };
     zip.file('metadata.json', JSON.stringify(metadata, null, 2));
@@ -81,7 +81,7 @@ async function packageFullDRP(options) {
     zip.file('metadata.json', JSON.stringify({
       ...metadata,
       exportedAt: metadata.exportedAt || new Date().toISOString(),
-      exportedFrom: 'Bradford Operations',
+      exportedFrom: 'davinci-resolve-mcp',
     }, null, 2));
   }
 
