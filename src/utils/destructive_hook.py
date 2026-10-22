@@ -131,6 +131,9 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
         "set_clip_marks",
         "clear_clip_marks",
     }),
+    # Rendered graphics are new files; import adds them to the pool and may
+    # append them to a track. render/still only write under the output dir.
+    "motion_graphics": frozenset({"import"}),
     "edit_engine": frozenset({
         "execute_selects",
         "execute_tighten",

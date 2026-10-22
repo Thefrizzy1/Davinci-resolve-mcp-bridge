@@ -1,0 +1,201 @@
+[
+  {
+    "id": "LowerThird",
+    "category": "2d",
+    "description": "Name + title strap that slides in, holds, and slides out. Alpha channel.",
+    "transparent": true,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 6,
+    "defaultProps": {
+      "name": "Jane Doe",
+      "title": "Director of Photography",
+      "accent": "#3b82f6",
+      "textColor": "#ffffff",
+      "panelColor": "rgba(10,12,20,0.78)",
+      "position": "left",
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "TitleCard",
+    "category": "2d",
+    "description": "Full-frame chapter/title card: gradient background, kinetic title, subtitle and accent rule.",
+    "transparent": false,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 5,
+    "defaultProps": {
+      "title": "Chapter One",
+      "subtitle": "Where it all began",
+      "background": "#0b0f19",
+      "background2": "#1e293b",
+      "accent": "#f59e0b",
+      "textColor": "#ffffff",
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "KineticText",
+    "category": "2d",
+    "description": "Words pop in one at a time (quotes, hooks, lyrics). Words wrapped in *asterisks* get the highlight colour. Alpha channel.",
+    "transparent": true,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 6,
+    "defaultProps": {
+      "text": "Make *every* frame count",
+      "color": "#ffffff",
+      "highlight": "#f59e0b",
+      "wordsPerSecond": 3,
+      "fontSize": 120,
+      "shadow": true,
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "Captions",
+    "category": "2d",
+    "description": "Styled subtitles with word-by-word highlight. Feed it segments (local_ai transcribe output) or an srt_path. Duration follows the transcript. Alpha channel.",
+    "transparent": true,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 6,
+    "defaultProps": {
+      "segments": [
+        {
+          "start": 0.2,
+          "end": 2.6,
+          "text": "Feed me a transcript from local_ai."
+        },
+        {
+          "start": 2.8,
+          "end": 5.6,
+          "text": "Each word lights up as it is spoken."
+        }
+      ],
+      "fontSize": 64,
+      "color": "#ffffff",
+      "highlight": "#facc15",
+      "box": true,
+      "boxColor": "rgba(0,0,0,0.6)",
+      "position": "bottom",
+      "wordByWord": true,
+      "uppercase": false,
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "Counter",
+    "category": "2d",
+    "description": "Animated number count-up with label (stats, prices, subscriber counts). Alpha channel.",
+    "transparent": true,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 4,
+    "defaultProps": {
+      "from": 0,
+      "to": 1000000,
+      "decimals": 0,
+      "prefix": "",
+      "suffix": "+",
+      "label": "Views",
+      "color": "#ffffff",
+      "accent": "#22c55e",
+      "fontSize": 180,
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "EndCard",
+    "category": "2d",
+    "description": "Outro card: headline, handle and call-to-action with animated accent shapes.",
+    "transparent": false,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 8,
+    "defaultProps": {
+      "headline": "Thanks for watching",
+      "handle": "@yourchannel",
+      "cta": "Subscribe for more",
+      "background": "#0b0f19",
+      "accent": "#ef4444",
+      "textColor": "#ffffff",
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "Particles3D",
+    "category": "3d",
+    "description": "Three.js particle field with drifting camera \u2014 backgrounds and transitions. Optional title on top; transparentBackground for alpha.",
+    "transparent": false,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 10,
+    "defaultProps": {
+      "count": 9000,
+      "color": "#60a5fa",
+      "color2": "#f472b6",
+      "size": 0.09,
+      "speed": 1,
+      "spread": 10,
+      "background": "#05060a",
+      "transparentBackground": false,
+      "title": "",
+      "titleColor": "#ffffff",
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "Text3D",
+    "category": "3d",
+    "description": "Three.js extruded-look 3D title that swings in under a moving light. Any system font and language.",
+    "transparent": false,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 6,
+    "defaultProps": {
+      "text": "RESOLVE",
+      "subtitle": "",
+      "color": "#f1f5f9",
+      "sideColor": "#1d4ed8",
+      "accent": "#3b82f6",
+      "background": "#05060a",
+      "transparentBackground": false,
+      "depth": 24,
+      "fontWeight": 900,
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  },
+  {
+    "id": "Shapes3D",
+    "category": "3d",
+    "description": "Three.js lit geometry (torusKnot, icosahedron, torus, box, sphere) rotating with a camera orbit \u2014 logo stings and backdrops.",
+    "transparent": false,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "durationSeconds": 8,
+    "defaultProps": {
+      "shape": "torusKnot",
+      "color": "#8b5cf6",
+      "color2": "#22d3ee",
+      "wireframe": false,
+      "metalness": 0.5,
+      "roughness": 0.25,
+      "background": "#05060a",
+      "transparentBackground": false,
+      "title": "",
+      "titleColor": "#ffffff",
+      "fontFamily": "Inter, 'Helvetica Neue', Arial, sans-serif"
+    }
+  }
+]

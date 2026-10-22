@@ -1,0 +1,26 @@
+{
+  "name": "davinci-resolve-mcp-motion",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Ready-made Remotion + Three.js motion graphics templates rendered by the DaVinci Resolve MCP bridge.",
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio src/index.jsx",
+    "list": "node render.mjs --list",
+    "render": "node render.mjs"
+  },
+  "dependencies": {
+    "@react-three/fiber": "9.8.1",
+    "@remotion/bundler": "4.0.531",
+    "@remotion/cli": "4.0.531",
+    "@remotion/renderer": "4.0.531",
+    "@remotion/three": "4.0.531",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "remotion": "4.0.531",
+    "three": "0.186.1"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}

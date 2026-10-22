@@ -1472,6 +1472,41 @@ def install_local_ai_extras(python_path, project_dir, dry_run=False):
         return False, tail[0]
 
 
+def provision_motion_graphics(project_dir, dry_run=False):
+    """Install the optional Remotion + Three.js motion-graphics extra.
+
+    npm-installs motion-graphics/ from its lockfile, then pre-downloads the
+    headless Chrome Remotion renders with, so the first render does not stall.
+    Returns (ok, message) and never raises.
+    """
+    motion = Path(project_dir) / "motion-graphics"
+    if not (motion / "package.json").is_file():
+        return False, "motion-graphics/ is not present in this checkout"
+    if dry_run:
+        return True, "would run npm ci + remotion browser ensure in motion-graphics/"
+    windows = platform.system() == "Windows"
+    npm, npx = ("npm.cmd", "npx.cmd") if windows else ("npm", "npx")
+    verb = "ci" if (motion / "package-lock.json").is_file() else "install"
+    try:
+        result = subprocess.run(
+            [npm, verb, "--no-audit", "--no-fund"], cwd=str(motion),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except FileNotFoundError:
+        return False, "npm was not found — install Node.js 18.18+ (https://nodejs.org) and re-run with --motion"
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:] or [f"exit {result.returncode}"]
+        return False, f"npm {verb} failed: {tail[0]}"
+    browser = subprocess.run(
+        [npx, "--no-install", "remotion", "browser", "ensure"], cwd=str(motion),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if browser.returncode != 0:
+        return True, ("templates installed; headless Chrome download failed — it will retry on first "
+                      "render (or set DAVINCI_RESOLVE_MCP_MOTION_BROWSER to a Chrome binary)")
+    return True, "Remotion + Three.js templates installed"
+
+
 def install_bridge(project_dir, dry_run=False):
     """Always place the in-app bridge into Resolve's Scripts folders.
 
@@ -1648,7 +1683,7 @@ def verify_resolve_connection(python_path, api_path, lib_path):
 
 def print_banner():
     title = f"DaVinci Resolve MCP Server — Installer v{VERSION}"
-    subtitle = "38 compound · 390 full · local AI · bridge"
+    subtitle = "39 compound · 390 full · local AI · bridge"
     print()
     print(bold("  ╔══════════════════════════════════════════════════════╗"))
     print(bold(f"  ║{title:^54}║"))
@@ -2176,6 +2211,7 @@ def main():
             Examples:
               python install.py                            Interactive mode
               python install.py --lmstudio --local-ai      LM Studio + Whisper, no prompts
+              python install.py --motion                   Add Remotion + Three.js motion graphics
               python install.py --clients all              Configure all clients
               python install.py --clients cursor,claude-desktop
               python install.py --clients manual           Just print the config
@@ -2200,6 +2236,14 @@ def main():
     parser.add_argument(
         "--no-local-ai", action="store_true",
         help="Skip the local AI extras without asking"
+    )
+    parser.add_argument(
+        "--motion", action="store_true",
+        help="Install the motion-graphics extra (Remotion + Three.js, needs Node) without asking"
+    )
+    parser.add_argument(
+        "--no-motion", action="store_true",
+        help="Skip the motion-graphics extra without asking"
     )
     parser.add_argument(
         "--no-venv", action="store_true",
@@ -2242,7 +2286,7 @@ def main():
         print_banner()
 
     project_dir = Path(__file__).resolve().parent
-    total_steps = 7
+    total_steps = 8
 
     if args.clear_update_preferences:
         clear_update_prompt_preferences(project_dir)
@@ -2447,11 +2491,40 @@ def main():
         print(f"  Whisper:   {dim('skipped (pip install -r requirements-local-ai.txt any time)')}")
 
     # ══════════════════════════════════════════════════════════════════════
-    # STEP 6: Configure MCP Clients
+    # STEP 6: Motion graphics extra (Remotion + Three.js)
     # ══════════════════════════════════════════════════════════════════════
 
     if interactive:
-        print_step(6, total_steps, "MCP Client Configuration")
+        print_step(6, total_steps, "Motion Graphics extra (Remotion + Three.js)")
+
+    motion_ready = (project_dir / "motion-graphics" / "node_modules" / "@remotion" / "renderer").is_dir()
+    if args.no_motion:
+        want_motion = False
+    elif args.motion:
+        want_motion = True
+    elif interactive and not motion_ready:
+        print(f"  {dim('Optional. Ready-made titles, lower thirds, captions and three.js 3D scenes the')}")
+        print(f"  {dim('AI renders and drops into Resolve. ~400 MB (Node packages + headless Chrome).')}")
+        print(f"  {dim('Already have your own Remotion project? Skip this and set DAVINCI_RESOLVE_MCP_MOTION_PROJECT.')}")
+        print(f"  {dim('Remotion licence: free for individuals and companies of up to 3 people; larger')}")
+        print(f"  {dim('companies need a Remotion company licence (remotion.dev/license).')}")
+        want_motion = prompt_yes_no("Install the motion graphics extra?", default=False)
+    else:
+        want_motion = False
+    if motion_ready and not args.motion:
+        print(f"  Motion:    {green('Already installed')}")
+    elif want_motion:
+        ok, message = provision_motion_graphics(project_dir, dry_run=args.dry_run)
+        print(f"  Motion:    {green(message) if ok else yellow(message)}")
+    else:
+        print(f"  Motion:    {dim('skipped (python install.py --motion any time)')}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STEP 7: Configure MCP Clients
+    # ══════════════════════════════════════════════════════════════════════
+
+    if interactive:
+        print_step(7, total_steps, "MCP Client Configuration")
 
     # Determine which clients to configure
     if args.clients:
@@ -2540,11 +2613,11 @@ def main():
         print(f"  {dim('No clients selected — skipping configuration')}")
 
     # ══════════════════════════════════════════════════════════════════════
-    # STEP 7: Verify Connection
+    # STEP 8: Verify Connection
     # ══════════════════════════════════════════════════════════════════════
 
     if interactive:
-        print_step(7, total_steps, "Verification")
+        print_step(8, total_steps, "Verification")
 
     verification_failed = False
     if api_path:

@@ -2,7 +2,7 @@
 """
 DaVinci Resolve MCP Server (Compound Tools)
 
-38 compound tools covering 100% of the DaVinci Resolve Scripting API (336 methods)
+39 compound tools covering 100% of the DaVinci Resolve Scripting API (336 methods)
 plus Fusion Fuse, DCTL, and Resolve-page Script authoring tools.
 Each tool groups related operations via an 'action' parameter.
 
@@ -405,7 +405,7 @@ def davinci_resolve_workflow() -> str:
     return """Use this DaVinci Resolve MCP server as a guarded post-production control surface.
 
 Core pattern:
-- Prefer the 38 compound tools and their action names over raw scripting.
+- Prefer the 39 compound tools and their action names over raw scripting.
 - Start by probing state: resolve_control.get_version/get_page, project_manager.get_current, timeline.get_current, and media_pool.probe_media_pool.
 - Before mutating timelines, media pools, render settings, grades, projects, databases, or extensions, prefer the matching probe, capabilities, boundary_report, safe_*, or dry_run action when one exists.
 - Preserve source media integrity. Never transcode, proxy, rewrite, move, rename, or create derivatives of source media unless the user explicitly asks. Analysis output belongs in sidecars or analysis directories.
@@ -413,6 +413,7 @@ Core pattern:
 
 Local models (LM Studio, Ollama, or any model that cannot open image or audio files itself):
 - Use local_ai instead of host_chat_paths vision: local_ai(action="describe", params={"clip_name": ...}) returns a plain-text description from the local vision model, and local_ai(action="transcribe", ...) returns the spoken text. local_ai(action="status") says what is installed.
+- motion_graphics renders titles, lower thirds, captions, counters and three.js 3D scenes (Remotion) and imports them into Resolve: list_templates, then render(template, props, import_to_resolve=true, track_index=2).
 
 Visual feedback:
 - To see what Resolve renders — grade, Fusion, titles — use timeline_frame(action="capture") when the client can display MCP images. It takes an optional timecode/frame, max_width to bound context cost, and quality="full" for a full-resolution frame; it restores the page, playhead, and timeline afterwards. Look at the frame instead of inferring from metadata.
@@ -33786,6 +33787,176 @@ def local_ai(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TOOL: motion_graphics — Remotion + Three.js templates rendered and imported
+#
+# Optional extra (motion-graphics/, `install.py --motion`). Renders run in a Node
+# child process; long ones hand back a job_id instead of blocking the client.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MOTION_ACTIONS = ["status", "list_templates", "render", "still", "job_status", "cancel", "import", "studio"]
+
+
+def _motion_import(path: str, p) -> Dict[str, Any]:
+    """Import a rendered file into the Media Pool and optionally place it on the timeline."""
+    _, proj, mp, err = _get_mp()
+    if err:
+        return err
+    items = mp.ImportMedia([path]) or []
+    if not items:
+        return _err(f"Resolve did not import {path}", code="IMPORT_FAILED", category="resolve_api_failed")
+    item = items[0]
+    out: Dict[str, Any] = {"imported": True, "clip_name": item.GetName(), "clip_id": item.GetUniqueId()}
+    if not (_coerce_bool(p.get("append_to_timeline")) or p.get("track_index") or _coerce_bool(p.get("at_playhead"))):
+        return out
+    tl = proj.GetCurrentTimeline()
+    if tl is None:
+        out["placed"] = False
+        out["place_error"] = "No current timeline"
+        return out
+    info: Dict[str, Any] = {"mediaPoolItem": item}
+    if p.get("track_index"):
+        track = int(p["track_index"])
+        while tl.GetTrackCount("video") < track:
+            if not tl.AddTrack("video"):
+                out["placed"] = False
+                out["place_error"] = f"Could not add video track {track}"
+                return out
+        info["trackIndex"] = track
+    record = p.get("record_frame")
+    if record is None and _coerce_bool(p.get("at_playhead")):
+        record, rerr = _timeline_timecode_to_frame_id(tl, tl.GetCurrentTimecode())
+        if rerr:
+            record = None
+    if record is not None:
+        info["recordFrame"] = int(record)
+    placed = mp.AppendToTimeline([info]) or []
+    out["placed"] = bool(placed)
+    out["placement"] = {k: v for k, v in info.items() if k != "mediaPoolItem"}
+    return out
+
+
+def _motion_post(job: Dict[str, Any], p) -> Dict[str, Any]:
+    """Run the import/placement a render asked for, once, after it finishes."""
+    from src.utils import motion_graphics as _mg
+
+    extra = job.get("extra") or {}
+    if job.get("status") != "done" or not extra.get("import_to_resolve") or extra.get("imported"):
+        return job
+    path = (job.get("result") or {}).get("out")
+    if path:
+        job["resolve"] = _motion_import(path, _Params({**extra, **dict(p)}))
+        _mg.mark_extra(job["id"], imported=True)
+    return job
+
+
+@mcp.tool()
+@_guard_missing_params
+@_destructive_op("motion_graphics")
+def motion_graphics(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Render motion graphics (Remotion + Three.js) and drop them into Resolve.
+
+    Bundled templates — 2D: LowerThird, TitleCard, KineticText, Captions, Counter,
+    EndCard. 3D (three.js): Particles3D, Text3D, Shapes3D. Transparent ones render
+    ProRes 4444 with alpha; others H.264. Every template takes durationSeconds,
+    fps, width, height in props. Use list_templates for each template's props.
+
+    Actions:
+      status() -> {available, node, bundled_templates, custom_project}
+      list_templates() -> {templates:[{id, description, defaultProps, ...}]}
+      render(template, props?, out_path?, codec?, scale?, import_to_resolve?,
+             append_to_timeline?, track_index?, at_playhead?, record_frame?,
+             srt_path?, transcript_from?, wait_seconds?) -> {out, ...} or {job_id}
+        Captions: pass props.segments, or srt_path, or transcript_from={path|clip_name|clip_id}
+        (transcribes with local_ai first). track_index puts it on that video track
+        (created if missing); at_playhead=true places it at the playhead.
+        Renders still running after wait_seconds (default 90) return a job_id.
+      still(template, props?, frame?, out_path?) -> {out}  — PNG preview of one frame.
+      job_status(job_id) -> {status, progress, result}  — also runs a pending import.
+      cancel(job_id)
+      import(path, append_to_timeline?, track_index?, at_playhead?, record_frame?)
+      studio(port?) -> {url}  — opens Remotion Studio for live editing/preview.
+
+    Your own Remotion project: set DAVINCI_RESOLVE_MCP_MOTION_PROJECT and its
+    compositions are listed/rendered instead of the bundled ones.
+    """
+    from src.utils import motion_graphics as _mg
+
+    p = _params(params)
+    if action not in _MOTION_ACTIONS:
+        return _unknown(action, _MOTION_ACTIONS)
+    try:
+        if action == "status":
+            return _mg.status()
+        if action == "list_templates":
+            return _mg.list_templates()
+        if action == "studio":
+            return _mg.start_studio(int(p.get("port", 3000)))
+        if action == "cancel":
+            return _mg.cancel(str(p["job_id"]))
+        if action == "job_status":
+            return _motion_post(_mg.job_status(str(p["job_id"])), p)
+        if action == "import":
+            path = os.path.abspath(os.path.expanduser(str(p["path"])))
+            if not os.path.isfile(path):
+                return _err(f"File not found: {path}", code="FILE_NOT_FOUND", category="invalid_input")
+            imported = _motion_import(path, p)
+            return imported if "error" in imported else _ok(**imported)
+        if action not in ("render", "still"):
+            return _unknown(action, _MOTION_ACTIONS)
+
+        template = str(p["template"])
+        props = dict(p.get("props") or {})
+        for key in ("durationSeconds", "fps", "width", "height"):
+            snake = re.sub(r"([A-Z])", lambda m: "_" + m.group(1).lower(), key)
+            if p.get(snake) is not None and key not in props:
+                props[key] = p.get(snake)
+        if template == "Captions" and not props.get("segments"):
+            if p.get("srt_path"):
+                props["segments"] = _mg.srt_to_segments(os.path.expanduser(str(p["srt_path"])))
+            elif p.get("transcript_from"):
+                from src.utils import local_ai as _local_ai
+
+                source = p["transcript_from"]
+                source = source if isinstance(source, dict) else {"path": source}
+                file_path, _, terr = _local_ai_resolve_target(_Params(source))
+                if terr:
+                    return terr
+                transcript = _local_ai.transcribe(file_path, word_timestamps=True,
+                                                  language=p.get("language"))
+                props["segments"] = transcript["segments"]
+        still = action == "still"
+        frame = int(p.get("frame", 30)) if still else None
+        job_id = _mg.start_render(
+            template, props, out_path=p.get("out_path"), codec=p.get("codec"), still_frame=frame,
+            scale=p.get("scale"), alpha=_coerce_bool(p.get("alpha")),
+            extra={key: p.get(key) for key in ("import_to_resolve", "append_to_timeline", "track_index",
+                                               "at_playhead", "record_frame") if p.get(key) is not None}
+            if not still else {},
+        )
+        job = _mg.wait(job_id, float(p.get("wait_seconds", 20 if still else _mg.DEFAULT_WAIT_SECONDS)))
+        if job["status"] == "running":
+            job["note"] = "Still rendering. Poll motion_graphics(action='job_status', params={'job_id': ...})."
+            return job
+        job = _motion_post(job, p)
+        if job["status"] != "done":
+            return _err((job.get("result") or {}).get("error") or "render failed", code="RENDER_FAILED",
+                        category="invalid_input", state=job,
+                        remediation="Check the props against list_templates; the error is the renderer's own message.")
+        return {"success": True, **(job.get("result") or {}), "job_id": job["id"],
+                **({"resolve": job["resolve"]} if job.get("resolve") else {})}
+    except _mg.MotionError as exc:
+        return _err(str(exc), code="MOTION_UNAVAILABLE", category="precondition")
+    except _local_ai_errors() as exc:
+        return _err(str(exc), code="LOCAL_AI_UNAVAILABLE", category="precondition")
+
+
+def _local_ai_errors():
+    from src.utils.local_ai import LocalAIError
+
+    return LocalAIError
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MCP Resources — agentic-flow improvement E1
 #
 # Resources are read-only state surfaces that hosts can pull WITHOUT consuming
@@ -34092,5 +34263,5 @@ if __name__ == "__main__":
         logger.error(f"Unknown --transport {transport!r}; use stdio|sse|streamable-http")
         sys.exit(2)
 
-    logger.info("Starting DaVinci Resolve MCP Server (38 compound tools)")
+    logger.info("Starting DaVinci Resolve MCP Server (39 compound tools)")
     run_fastmcp_stdio(mcp)

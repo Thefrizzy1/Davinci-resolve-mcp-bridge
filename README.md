@@ -1,7 +1,7 @@
 # DaVinci Resolve MCP Bridge
 
 [![Version](https://img.shields.io/badge/version-4.14.4-blue.svg)](CHANGELOG.md)
-[![Tools](https://img.shields.io/badge/MCP%20Tools-38%20(390%20full)-blue.svg)](#whats-what)
+[![Tools](https://img.shields.io/badge/MCP%20Tools-39%20(390%20full)-blue.svg)](#whats-what)
 [![Advanced](https://img.shields.io/badge/Advanced%20(offline)-18%20tools-blueviolet.svg)](#whats-what)
 [![Local AI](https://img.shields.io/badge/local%20AI-Whisper%20%2B%20vision-green.svg)](#local-ai-transcription-and-vision)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,7 +9,7 @@
 Control DaVinci Resolve from an AI assistant over MCP. Works with local models (LM Studio, Ollama) as well as Claude, Cursor and others. Includes a local Whisper + vision suite, so a local model can "hear" and "see" your footage without any cloud service.
 
 > This is a personal fork of [samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp) (MIT).
-> Changes in this fork: a `local_ai` tool (Whisper transcription + LM Studio/Ollama vision), the installer always installs the Resolve bridge, the installer can set up LM Studio directly, promo for the upstream's paid app is removed, and this README is shorter.
+> Changes in this fork: a `local_ai` tool (Whisper transcription + LM Studio/Ollama vision), a `motion_graphics` tool (Remotion + Three.js templates rendered straight into Resolve), the installer always installs the Resolve bridge, the installer can set up LM Studio directly, promo for the upstream's paid app is removed, and this README is shorter.
 
 ## Install
 
@@ -24,13 +24,15 @@ The installer runs these steps in order:
 1. Finds Resolve and creates a `venv/` with the dependencies.
 2. **Always installs the in-app bridge** into Resolve's `Scripts/Utility` folders. You need it on the free edition. On Studio it does no harm.
 3. Asks whether to install the **local AI extras** (faster-whisper).
-4. Asks **"Install straight into LM Studio?"**, which writes `~/.lmstudio/mcp.json`. After that you can pick any other clients.
-5. Checks the connection to Resolve.
+4. Asks whether to install the **motion graphics extra** (Remotion + Three.js). The default answer is no, since many people already have their own setup.
+5. Asks **"Install straight into LM Studio?"**, which writes `~/.lmstudio/mcp.json`. After that you can pick any other clients.
+6. Checks the connection to Resolve.
 
 To run it without the prompts:
 
 ```bash
 python install.py --lmstudio --local-ai          # LM Studio + Whisper
+python install.py --motion                       # add Remotion + Three.js motion graphics
 python install.py --clients lmstudio,cursor      # several clients
 python install.py --clients manual               # just print the JSON config
 ```
@@ -43,9 +45,10 @@ python install.py --clients manual               # just print the JSON config
 
 | Part | What it is | When you need it |
 |---|---|---|
-| `src/server.py` | **Main MCP server.** 38 grouped tools (project, media pool, timeline, color, Fusion, Fairlight, render, `local_ai`…) | Always. This is what your client runs. |
+| `src/server.py` | **Main MCP server.** 39 grouped tools (project, media pool, timeline, color, Fusion, Fairlight, render, `local_ai`, `motion_graphics`…) | Always. This is what your client runs. |
 | `src/server.py --full` | Same server with one tool per Resolve API method (390 tools) | Only for power users. It's too many tools for small local models. |
 | `local_ai` tool | Whisper transcription and frame descriptions, all on this machine | When your model can't read audio or images itself |
+| `motion_graphics` tool + `motion-graphics/` | Remotion + Three.js templates (titles, lower thirds, captions, counters, 3D) rendered to ProRes 4444/H.264 and imported into Resolve | When you want generated graphics on the timeline (optional extra) |
 | Resolve bridge (`scripts/install_resolve_bridge.py`) | A small script that runs *inside* Resolve and passes commands from the server over loopback (HMAC-signed) | Free edition (required) or when external scripting is off |
 | `bin/davinci-resolve-advanced-mcp.mjs` | Optional Node server that edits `.drp/.drt/.drx` files offline, with Resolve closed | Offline project, timeline and grade file work |
 | Control panel (`venv/bin/python -m src.control_panel`) | Local browser UI for inspecting Resolve state and analysis results | Optional |
@@ -79,6 +82,43 @@ local_ai(action="analyze",    params={"clip_name": "A001_C003"})   # both at onc
 
 Install the extras later with `venv/bin/pip install -r requirements-local-ai.txt` (on Windows, `venv\Scripts\pip`).
 
+## Motion graphics: Remotion + Three.js
+
+This is an optional extra. Install it with `python install.py --motion` (needs Node 18.18+). The AI picks a template, fills in the props, renders it, and drops the result onto your timeline:
+
+```text
+motion_graphics(action="list_templates")
+motion_graphics(action="render", params={"template": "LowerThird",
+    "props": {"name": "Ada Lovelace", "title": "Mathematician"},
+    "import_to_resolve": true, "track_index": 2, "at_playhead": true})
+motion_graphics(action="render", params={"template": "Captions",
+    "transcript_from": {"clip_name": "A001_C003"}, "import_to_resolve": true})
+motion_graphics(action="still", params={"template": "Text3D", "props": {"text": "SEASON 2"}})
+```
+
+| Template | What it is |
+|---|---|
+| `LowerThird` · `KineticText` · `Captions` · `Counter` | Overlays with an alpha channel (ProRes 4444) |
+| `TitleCard` · `EndCard` | Full-frame cards |
+| `Particles3D` · `Text3D` · `Shapes3D` | three.js scenes. Set `transparentBackground: true` for alpha. |
+
+- Every template accepts `durationSeconds`, `fps`, `width` and `height`.
+- `Captions` can take `segments`, an `srt_path`, or `transcript_from`. With `transcript_from` it runs `local_ai` Whisper first, then renders word-by-word subtitles.
+- Long renders return a `job_id`. Poll it with `job_status`. The import onto the timeline happens when the render finishes.
+- `studio` opens Remotion Studio so you can preview and tweak in the browser. You can also run `cd motion-graphics && npm run studio`.
+- Claude Code and other shell tools can call the renderer directly:
+  `node motion-graphics/render.mjs --template TitleCard --props '{"title":"Hi"}' --out title.mp4`
+- **Already have your own Remotion project?** Skip the extra and set `DAVINCI_RESOLVE_MCP_MOTION_PROJECT=/path/to/project`. The tool will list and render your own compositions with your own Remotion version.
+- To add a template, put a component in `motion-graphics/src/templates/`, register it in `src/Root.jsx`, and add an entry to `templates.json`.
+- **Licence:** Remotion is free for individuals and companies of up to 3 people. Larger companies need a [Remotion company licence](https://www.remotion.dev/license). Three.js is MIT.
+
+| Env var | Purpose |
+|---|---|
+| `DAVINCI_RESOLVE_MCP_MOTION_PROJECT` / `_ENTRY` | Use your own Remotion project and entry file |
+| `DAVINCI_RESOLVE_MCP_MOTION_OUT` | Where renders go (default `motion-graphics/out/`) |
+| `DAVINCI_RESOLVE_MCP_MOTION_BROWSER` | Path to a Chrome or Chromium binary, if Remotion's download is blocked |
+| `DAVINCI_RESOLVE_MCP_MOTION_GL` | WebGL backend: `angle` (default on Mac and Windows), `swangle` (default on Linux), `egl` or `vulkan` |
+
 ## LM Studio tips
 
 - The installer adds the server as `davinci-resolve` to `~/.lmstudio/mcp.json`. Any other servers already in that file stay as they are. Restart LM Studio after installing.
@@ -111,7 +151,7 @@ Blackmagic only allows *external* scripting on Studio. The bridge is a small scr
 
 - DaVinci Resolve 18.5 or later (Studio, or the free edition through the bridge)
 - Python 3.10–3.12 is the safest choice. 3.13+ works on recent Resolve builds.
-- Optional: ffmpeg, Node 20.9+ (for the advanced offline server)
+- Optional: ffmpeg, Node 18.18+ (for motion graphics) / 20.9+ (for the advanced offline server)
 
 ## License
 

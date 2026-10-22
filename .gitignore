@@ -136,3 +136,8 @@ davinci-resolve-mcp-analysis/
 
 # CI managed-install handshake probe output
 handshake.jsonl
+
+# motion-graphics extra (Remotion): deps, bundle cache, default render output
+motion-graphics/node_modules/
+motion-graphics/.cache/
+motion-graphics/out/
