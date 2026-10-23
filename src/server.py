@@ -2,7 +2,7 @@
 """
 DaVinci Resolve MCP Server (Compound Tools)
 
-39 compound tools covering 100% of the DaVinci Resolve Scripting API (336 methods)
+40 compound tools covering 100% of the DaVinci Resolve Scripting API (336 methods)
 plus Fusion Fuse, DCTL, and Resolve-page Script authoring tools.
 Each tool groups related operations via an 'action' parameter.
 
@@ -420,7 +420,7 @@ def davinci_resolve_workflow() -> str:
     return """Use this DaVinci Resolve MCP server as a guarded post-production control surface.
 
 Core pattern:
-- Prefer the 39 compound tools and their action names over raw scripting.
+- Prefer the 40 compound tools and their action names over raw scripting.
 - Start by probing state: resolve_control.get_version/get_page, project_manager.get_current, timeline.get_current, and media_pool.probe_media_pool.
 - Before mutating timelines, media pools, render settings, grades, projects, databases, or extensions, prefer the matching probe, capabilities, boundary_report, safe_*, or dry_run action when one exists.
 - Preserve source media integrity. Never transcode, proxy, rewrite, move, rename, or create derivatives of source media unless the user explicitly asks. Analysis output belongs in sidecars or analysis directories.
@@ -33978,7 +33978,9 @@ def _motion_import(path: str, p) -> Dict[str, Any]:
     info: Dict[str, Any] = {"mediaPoolItem": item}
     if p.get("track_index"):
         track = int(p["track_index"])
-        while tl.GetTrackCount("video") < track:
+        for _ in range(max(0, track) + 1):
+            if int(tl.GetTrackCount("video") or 0) >= track:
+                break
             if not tl.AddTrack("video"):
                 out["placed"] = False
                 out["place_error"] = f"Could not add video track {track}"
@@ -34116,6 +34118,297 @@ def _local_ai_errors():
     from src.utils.local_ai import LocalAIError
 
     return LocalAIError
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TOOL: editor — the whole edit in ~5 calls, compact text replies (local models)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_EDITOR_ACTIONS = ["footage", "transcribe", "sentences", "build", "review"]
+_EDITOR_STATE: Dict[str, Any] = {"clips": {}, "jobs": {}}
+_EDITOR_WAIT_SECONDS = 25.0
+
+
+def _editor_text(lines) -> Any:
+    """Plain text reply: no JSON quoting, no envelope — cheapest for the model."""
+    text = "\n".join(lines) if isinstance(lines, (list, tuple)) else str(lines)
+    return mcp_types.TextContent(type="text", text=text)
+
+
+def _editor_scan() -> Tuple[Dict[str, Dict[str, Any]], Optional[Dict[str, Any]]]:
+    from src.utils import editor as _ed
+
+    _, _, mp, err = _get_mp()
+    if err:
+        return {}, err
+    found = []
+    stack = [mp.GetRootFolder()]
+    while stack:
+        folder = stack.pop()
+        for clip in (folder.GetClipList() or []):
+            props = clip.GetClipProperty() or {}
+            if not isinstance(props, dict):
+                props = {}
+            name = str(clip.GetName() or props.get("Clip Name") or "")
+            try:
+                fps = float(str(props.get("FPS") or "0").split()[0])
+            except ValueError:
+                fps = 0.0
+            try:
+                frames = float(str(props.get("Frames") or "0"))
+            except ValueError:
+                frames = 0.0
+            duration = frames / fps if fps and frames else 0.0
+            found.append({
+                "name": name, "id": clip.GetUniqueId(), "item": clip, "fps": fps, "duration": round(duration, 2),
+                "path": props.get("File Path") or "", "type": props.get("Type") or "",
+                "kind": _ed.guess_kind(name, str(props.get("Type") or "")),
+            })
+        stack.extend(folder.GetSubFolderList() or [])
+    ids = _ed.short_ids([f"{c['name']}\x00{c['id']}" for c in found])
+    clips = {ids[f"{c['name']}\x00{c['id']}"]: c for c in found}
+    _EDITOR_STATE["clips"] = clips
+    return clips, None
+
+
+def _editor_resolve_clip(ref: str) -> Optional[str]:
+    clips = _EDITOR_STATE["clips"]
+    key = str(ref).strip()
+    if key.lower() in clips:
+        return key.lower()
+    for short, c in clips.items():
+        if key in (c["id"], c["name"]):
+            return short
+    return None
+
+
+def _editor_sentences(short: str):
+    from src.utils import editor as _ed
+
+    clip = _EDITOR_STATE["clips"].get(short)
+    if not clip or not clip["path"]:
+        return None
+    cached = _ed.load_transcript(clip["path"])
+    return cached["sentences"] if cached else None
+
+
+def _editor_transcribe(p) -> List[str]:
+    from src.utils import editor as _ed
+    from src.utils import local_ai as _local_ai
+
+    clips = _EDITOR_STATE["clips"]
+    wanted = p.get("clips") or "speech"
+    if isinstance(wanted, str) and wanted in ("speech", "all"):
+        targets = [s for s, c in clips.items() if c["kind"] == "video" or (wanted == "all" and c["kind"] != "music")]
+    else:
+        targets = [_editor_resolve_clip(r) for r in (wanted if isinstance(wanted, list) else [wanted])]
+        if None in targets:
+            return [f"Unknown clip in {wanted!r}; use the c-numbers from editor(action='footage')."]
+    model = p.get("model")
+    for short in targets:
+        clip = clips[short]
+        path = clip["path"]
+        if not path or not os.path.isfile(path):
+            continue
+        if _ed.load_transcript(path) or _EDITOR_STATE["jobs"].get(path):
+            continue
+
+        def work(progress, _path=path):
+            result = _local_ai.transcribe(_path, model=model, word_timestamps=True, on_progress=progress)
+            return {"sentences": len(_ed.save_transcript(_path, result)["sentences"])}
+
+        _EDITOR_STATE["jobs"][path] = _local_ai.start_job("transcribe", clip["name"], work)
+
+    deadline = time.monotonic() + float(p.get("wait_seconds", _EDITOR_WAIT_SECONDS))
+    while True:
+        lines, pending = [], 0
+        for short in targets:
+            clip = clips[short]
+            cached = _ed.load_transcript(clip["path"]) if clip["path"] else None
+            job_id = _EDITOR_STATE["jobs"].get(clip["path"])
+            job = _local_ai.wait_job(job_id, 0) if job_id else None
+            if cached:
+                lines.append(f"{short} {clip['name']}: done, {len(cached['sentences'])} sentences")
+            elif job and job["status"] == "error":
+                _EDITOR_STATE["jobs"].pop(clip["path"], None)
+                lines.append(f"{short} {clip['name']}: FAILED {job.get('error')}")
+            elif job:
+                pending += 1
+                lines.append(f"{short} {clip['name']}: {job['status']} {int((job.get('progress') or 0) * 100)}%")
+            else:
+                lines.append(f"{short} {clip['name']}: no file on disk, skipped")
+        if not pending or time.monotonic() >= deadline:
+            break
+        time.sleep(1.0)
+    if pending:
+        lines.append(f"{pending} still running — call editor(action='transcribe') again (it waits 25 s).")
+    else:
+        lines.append("All done. Next: editor(action='sentences').")
+    return lines
+
+
+def _editor_build(p) -> List[str]:
+    from src.utils import editor as _ed
+
+    clips = _EDITOR_STATE["clips"]
+    _, proj, mp, err = _get_mp()
+    if err:
+        return [err["error"]["message"]]
+    try:
+        tl_fps = float(str(proj.GetSetting("timelineFrameRate") or "25").split()[0])
+    except ValueError:
+        tl_fps = 25.0
+    request = dict(p)
+    try:
+        plan = _ed.plan_timeline(request, {s: c for s, c in clips.items()}, _editor_sentences, tl_fps)
+    except _ed.EditorError as exc:
+        return [f"PROBLEM: {exc}"]
+    lines = _ed.format_plan(plan, tl_fps)
+    if _coerce_bool(p.get("dry_run")) or plan["errors"]:
+        lines.insert(0, "PLAN ONLY (nothing changed in Resolve)" + (" — fix the problems and call build again." if plan["errors"] else
+                     ". Call build again without dry_run to make it."))
+        return lines
+
+    base = str(p.get("name") or "AI cut")
+    existing = {(proj.GetTimelineByIndex(i).GetName() if proj.GetTimelineByIndex(i) else "")
+                for i in range(1, int(proj.GetTimelineCount() or 0) + 1)}
+    name, n = base, 2
+    while name in existing:
+        name, n = f"{base} ({n})", n + 1
+    tl = mp.CreateEmptyTimeline(name)
+    if not tl:
+        return [f"Resolve could not create a timeline called {name!r}."]
+    if not proj.SetCurrentTimeline(tl):
+        # AppendToTimeline writes to the CURRENT timeline; carrying on would put
+        # the edit into whatever timeline happened to be open.
+        return [f"Created {name!r} but Resolve would not make it the current timeline; nothing was placed. "
+                "Open it in Resolve and call build again with a new name."]
+    # Bounded: a Resolve that reports success without adding a track must not
+    # spin this forever.
+    for kind, extra in (("video", ()), ("audio", ("stereo",))):
+        for _ in range(4):
+            if int(tl.GetTrackCount(kind) or 0) >= 2 or not tl.AddTrack(kind, *extra):
+                break
+    start = int(tl.GetStartFrame() or 0)
+    colors = {str(k).lower(): v for k, v in (p.get("colors") or {}).items()}
+    failures = []
+
+    def append(entry, track_index, media_type=None):
+        clip = clips[entry["clip"]]
+        info = {"mediaPoolItem": clip["item"], "startFrame": entry["start_frame"], "endFrame": entry["end_frame"],
+                "recordFrame": start + entry["record"], "trackIndex": track_index}
+        if media_type:
+            info["mediaType"] = media_type
+        items = mp.AppendToTimeline([info]) or []
+        if not items:
+            failures.append(f"{entry['track']} {entry.get('ref') or entry['clip']} was not placed")
+            return
+        color = colors.get(entry["clip"]) or colors.get(clip["name"].lower()) or colors.get(str(clip["kind"]).lower())
+        if color:
+            for item in items:
+                if item is not None and not item.SetClipColor(color):
+                    failures.append(f"colour {color!r} on {entry.get('ref') or entry['clip']} (not a Resolve clip colour?)")
+
+    for entry in plan["v1"]:
+        append(entry, 1)
+    for entry in plan["covers"]:
+        append(entry, 2, 1)
+    if plan["music"]:
+        append(plan["music"], 2, 2)
+    for marker in plan["markers"]:
+        if not tl.AddMarker(marker["frame"], str(p.get("marker_color") or "Blue"), marker["name"], "", 1):
+            failures.append(f"marker {marker['name']} was not added")
+    return [f"Built timeline {name!r} and made it current."] + lines + _editor_review_lines(tl, tl_fps) + \
+        [f"FAILED: {f}" for f in failures]
+
+
+def _editor_review_lines(tl, fps) -> List[str]:
+    start = int(tl.GetStartFrame() or 0)
+    lines = ["Check:"]
+    for kind, idx in (("video", 1), ("video", 2), ("audio", 1), ("audio", 2)):
+        items = tl.GetItemListInTrack(kind, idx) or []
+        spans = sorted((int(i.GetStart()) - start, int(i.GetEnd()) - start, i.GetName()) for i in items)
+        gaps = [f"{a / fps:.2f}-{b / fps:.2f}" for (_, a, _), (b, _, _) in zip(spans, spans[1:]) if b > a]
+        label = f"{'V' if kind == 'video' else 'A'}{idx}"
+        if not spans:
+            lines.append(f"{label}: empty")
+            continue
+        lines.append(f"{label}: {len(spans)} items, {spans[0][0] / fps:.2f}-{spans[-1][1] / fps:.2f}s"
+                     + (f", GAPS at {', '.join(gaps)}" if gaps and idx == 1 else ", no gaps" if idx == 1 else ""))
+    markers = tl.GetMarkers() or {}
+    if markers:
+        lines.append("Markers: " + ", ".join(f"{m.get('name')} {int(f) / fps:.2f}s" for f, m in sorted(markers.items())))
+    return lines
+
+
+@mcp.tool()
+@_guard_missing_params
+def editor(action: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """Make an edit from raw footage in ~5 calls. USE THIS for cutting a video.
+
+    1. footage() -> one line per clip: c-number, name, kind, length, fps, transcribed?
+    2. transcribe(clips?="speech", model?) -> local Whisper on every video clip, in the
+       background; cached forever. If it says "still running", call it again.
+    3. sentences(clips?, contains?) -> "c1#4 12.30-15.90 text" lines. c1#4 = clip c1,
+       sentence 4. Pick sentences by these refs.
+    4. build(name, lines, covers?, music?, colors?, target_seconds?, dry_run?) -> makes the
+       timeline and checks it. Times are SECONDS; the server does all frame maths.
+       lines: in order on V1+A1, back to back, no gaps. Each is "c1#4", "c1#4-6" (sentences
+         4..6 together), or {"ref":"c1#4","part":"Hook"}, or {"clip":"c5","in":3,"out":7,
+         "part":"Hook"} for clips without speech. Sentence cuts get 0.1 s before / 0.3 s after
+         automatically (pad_in/pad_out). "part" puts a marker at that line.
+       covers: [{"clip":"c6","in":30,"out":34,"over":"c1#4"}] video-only on V2, starting
+         0.5 s into that line (or "at": seconds).
+       music: "c9" -> on A2 from 0 to the end.  colors: {"c1":"Blue","c5":"Green"}.
+       target_seconds: [55,65] warns if outside. dry_run=true shows the plan only.
+    5. review() -> what is on the current timeline, gaps, markers.
+    """
+    from src.utils import editor as _ed
+
+    p = _params(params)
+    if action not in _EDITOR_ACTIONS:
+        return _unknown(action, _EDITOR_ACTIONS)
+    if action == "footage" or not _EDITOR_STATE["clips"]:
+        clips, err = _editor_scan()
+        if err:
+            return err
+        if action == "footage":
+            lines = []
+            for short in sorted(clips, key=lambda s: int(s[1:])):
+                c = clips[short]
+                tr = _ed.load_transcript(c["path"]) if c["path"] else None
+                rate = f"{c['fps']:g}fps" if c["fps"] else "audio"
+                lines.append(f"{short} {c['name']} | {c['kind']} | {_ed.fmt_seconds(c['duration'])} | {rate}"
+                             + (f" | transcribed ({len(tr['sentences'])} sentences)" if tr else ""))
+            lines.append("Next: editor(action='transcribe') for the speech clips, then sentences.")
+            return _editor_text(lines)
+    if action == "transcribe":
+        return _editor_text(_editor_transcribe(p))
+    if action == "sentences":
+        wanted = p.get("clips")
+        shorts = sorted(_EDITOR_STATE["clips"], key=lambda s: int(s[1:])) if not wanted else \
+            [_editor_resolve_clip(r) for r in (wanted if isinstance(wanted, list) else [wanted])]
+        lines = []
+        for short in shorts:
+            if short is None:
+                continue
+            sents = _editor_sentences(short)
+            if sents:
+                lines.append(f"== {short} {_EDITOR_STATE['clips'][short]['name']}")
+                lines += _ed.format_sentences(short, sents, str(p.get("contains") or ""))
+        return _editor_text(lines or ["No transcripts yet — call editor(action='transcribe') first."])
+    if action == "build":
+        return _editor_text(_editor_build(p))
+    if action != "review":
+        return _unknown(action, _EDITOR_ACTIONS)
+    proj, tl, err = _get_tl()
+    if err:
+        return err
+    try:
+        fps = float(str(tl.GetSetting("timelineFrameRate") or proj.GetSetting("timelineFrameRate")).split()[0])
+    except ValueError:
+        fps = 25.0
+    return _editor_text([f"Timeline {tl.GetName()!r}"] + _editor_review_lines(tl, fps))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -34397,6 +34690,23 @@ if __name__ == "__main__":
     logger.info(f"Profile: {_edition_profile.edition()} edition, {_edition_profile.toolset()} tool set"
                 + (f"; hidden tools: {', '.join(_hidden)}" if _hidden else ""))
     _install_threaded_tool_dispatch(mcp)
+    if _edition_profile.toolset() == "lean":
+        # Short, imperative instructions: a small model should know the exact
+        # call sequence without reading anything else.
+        mcp._mcp_server.instructions = (
+            "DaVinci Resolve editing. To cut a video use the editor tool in this order: "
+            "1) editor footage  2) editor transcribe (repeat until 'All done')  "
+            "3) editor sentences  4) pick sentences by ref like c1#4, then editor build with "
+            "dry_run=true, fix PROBLEM lines, build again without dry_run  5) editor review. "
+            "Times are seconds; the server does frames, padding, gaps, colours and markers. "
+            "motion_graphics renders titles/lower thirds/captions and imports them."
+        )
+    if _edition_profile.compact_output():
+        # Small models: no envelope, one minified copy of each result.
+        from src.utils import operation_result as _operation_result
+
+        _operation_result.set_envelope_mode("legacy")
+        logger.info(f"Compact output on for {_edition_profile.apply_compact_output(mcp)} tools")
 
     # Support --full flag to run the 377-tool granular server instead
     if "--full" in sys.argv:
@@ -34428,5 +34738,5 @@ if __name__ == "__main__":
         logger.error(f"Unknown --transport {transport!r}; use stdio|sse|streamable-http")
         sys.exit(2)
 
-    logger.info("Starting DaVinci Resolve MCP Server (39 compound tools)")
+    logger.info("Starting DaVinci Resolve MCP Server (40 compound tools)")
     run_fastmcp_stdio(mcp)

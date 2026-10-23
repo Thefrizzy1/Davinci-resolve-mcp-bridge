@@ -1785,7 +1785,7 @@ def verify_resolve_connection(python_path, api_path, lib_path, bridge_only=False
 
 def print_banner():
     title = f"DaVinci Resolve MCP Server — Installer v{VERSION}"
-    subtitle = "39 compound · 390 full · local AI · bridge"
+    subtitle = "40 compound · 390 full · local AI · bridge"
     print()
     print(bold("  ╔══════════════════════════════════════════════════════╗"))
     print(bold(f"  ║{title:^54}║"))
@@ -2350,8 +2350,9 @@ def main():
         help="Your DaVinci Resolve edition. 'free' = bridge only, Studio-only actions removed"
     )
     parser.add_argument(
-        "--toolset", choices=["full", "resolve"], default=None,
-        help="'resolve' = only the Resolve-control tools (no local_ai/motion_graphics/knowledge)"
+        "--toolset", choices=["lean", "resolve", "full"], default=None,
+        help="'lean' = editor + motion_graphics only (~1k tokens, best for local models); "
+             "'resolve' = Resolve-control tools only; 'full' = everything"
     )
     parser.add_argument(
         "--motion", action="store_true",
@@ -2482,13 +2483,15 @@ def main():
     if toolset is None:
         if interactive:
             print(f"\n  Which tools should the AI see?")
-            print(f"    {cyan('1')}. Everything        {dim('Resolve control + local_ai, motion_graphics, knowledge')}")
-            print(f"    {cyan('2')}. Resolve only      {dim('just the Resolve tools — smaller, better for small local models')}")
+            print(f"    {cyan('1')}. Lean editor       {dim('~1k tokens: the editor tool (transcribe, pick sentences, build the')}")
+            print(f"                          {dim('timeline in ~5 calls) + motion graphics. Best for LM Studio / local models.')}")
+            print(f"    {cyan('2')}. Resolve only      {dim('~30k tokens: every Resolve tool, no extras')}")
+            print(f"    {cyan('3')}. Everything        {dim('~36k tokens: all 40 tools — for Claude/GPT-class models')}")
             try:
                 answer = input(f"  Select [1]: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 answer = ""
-            toolset = "resolve" if answer in ("2", "resolve") else "full"
+            toolset = {"2": "resolve", "resolve": "resolve", "3": "full", "full": "full"}.get(answer, "lean")
         else:
             toolset = edition_profile.toolset()
     free_edition = edition == "free"
@@ -2496,7 +2499,7 @@ def main():
         edition_profile.save(edition, toolset)
     print(f"  Edition:   {bold(edition)}"
           + (f" {dim('(bridge only — external scripting is never used; Studio-only actions removed)')}" if free_edition else ""))
-    print(f"  Tools:     {bold('Resolve only' if toolset == 'resolve' else 'everything')}")
+    print(f"  Tools:     {bold({'lean': 'lean editor', 'resolve': 'Resolve only'}.get(toolset, 'everything'))}")
 
     if not api_path and not free_edition:
         print(f"\n  {yellow('Warning:')} Could not auto-detect DaVinci Resolve installation.")
@@ -2905,6 +2908,10 @@ def main():
         else:
             print(f"    1. Open your MCP client")
             print(f"    2. Start using natural language to control Resolve!")
+        print()
+        prep = "venv\\Scripts\\python" if is_windows() else "venv/bin/python"
+        print(f"  {bold('Tip:')} with your project open, run {cyan(prep + ' scripts/prep_footage.py')} once —")
+        print(f"  it transcribes all footage up front, so the AI starts editing straight away.")
         print()
         print(f"  {dim(f'Server: {server_path}')}")
         print(f"  {dim(f'Python: {python_path}')}")

@@ -1,7 +1,7 @@
 # DaVinci Resolve MCP Bridge
 
 [![Version](https://img.shields.io/badge/version-4.14.4-blue.svg)](CHANGELOG.md)
-[![Tools](https://img.shields.io/badge/MCP%20Tools-39%20(390%20full)-blue.svg)](#whats-what)
+[![Tools](https://img.shields.io/badge/MCP%20Tools-40%20(390%20full)-blue.svg)](#whats-what)
 [![Advanced](https://img.shields.io/badge/Advanced%20(offline)-18%20tools-blueviolet.svg)](#whats-what)
 [![Local AI](https://img.shields.io/badge/local%20AI-Whisper%20%2B%20vision-green.svg)](#local-ai-transcription-and-vision)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -45,11 +45,34 @@ python install.py --clients manual               # just print the JSON config
 - **Studio:** set Preferences ▸ General ▸ *External scripting using* to **Local**.
 - **Free edition:** restart Resolve, open a project, then run **Workspace ▸ Scripts ▸ resolve_bridge**. The server finds the bridge automatically.
 
+## Editing with a local model (the fast way)
+
+The full tool list costs about 36,000 tokens before your model reads a word, which is more than most local models can hold. Pick **Lean editor** in the installer (or run `python install.py --toolset lean`). The model then sees only the `editor` and `motion_graphics` tools, about 1,000 tokens. Replies are compact text instead of pretty-printed JSON sent twice.
+
+1. **Before you chat**, with your project open in Resolve (and the bridge running on the free edition):
+   `venv\Scripts\python scripts\prep_footage.py` (on macOS/Linux: `venv/bin/python scripts/prep_footage.py`)
+   This transcribes all speech clips once. Transcripts are cached, so later chats skip this step.
+2. **In the chat**, the model works through five calls:
+
+| Call | What comes back |
+|---|---|
+| `editor footage` | One line per clip: `c3 G02A1952.MP4 \| video \| 2:25.00 \| 50fps \| transcribed` |
+| `editor transcribe` | Only needed if you skipped step 1. Repeat it until it says "All done". |
+| `editor sentences` | `c3#4 20.00-23.55 The catch is it is slow on twelve gigabytes.` |
+| `editor build` with `dry_run: true` | The timeline plan, the total length, and `PROBLEM:` lines to fix |
+| `editor build` | Builds it: back to back on V1, covers on V2, music on A2, colours, markers, then checks for gaps |
+
+The model only picks sentences (`"c3#4"`, or `"c3#4-6"` for several in a row) and says which part each starts. The server converts seconds to frames, adds 0.1 s before and 0.3 s after each sentence so no word is clipped, and places everything with no gaps.
+
+A prompt that fits this workflow:
+
+> Make a 55-65 s video from my footage with the editor tool. Story: Hook (the result, on my own RTX 3060) → Problem (everyone uses cloud tools, I wanted local) → Workflow (what I built) → Catch (slow on 12 GB) → Get it (free on GitHub). Each line must follow from the last with a "but" or "so". Open with 3-5 s of the fox story, then my best complete sentences (no false starts or crew talk). Add 4-6 covers of 2-5 s over the lines they match, never over my first sentence, plus the music. Colours: talking Blue, story Green, 3D Orange. Put a part on the first line of each section. Do a dry run first, fix any problems, then build, and tell me the sentences you chose.
+
 ## What's what
 
 | Part | What it is | When you need it |
 |---|---|---|
-| `src/server.py` | **Main MCP server.** 39 grouped tools (project, media pool, timeline, color, Fusion, Fairlight, render, `local_ai`, `motion_graphics`…) | Always. This is what your client runs. |
+| `src/server.py` | **Main MCP server.** 40 grouped tools (project, media pool, timeline, color, Fusion, Fairlight, render, `editor`, `local_ai`, `motion_graphics`…) | Always. This is what your client runs. |
 | `src/server.py --full` | Same server with one tool per Resolve API method (390 tools) | Only for power users. It's too many tools for small local models. |
 | `local_ai` tool | Whisper transcription and frame descriptions, all on this machine | When your model can't read audio or images itself |
 | `motion_graphics` tool + `motion-graphics/` | Remotion + Three.js templates (titles, lower thirds, captions, counters, 3D) rendered to ProRes 4444/H.264 and imported into Resolve | When you want generated graphics on the timeline (optional extra) |

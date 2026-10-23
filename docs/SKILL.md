@@ -352,7 +352,7 @@ to the user as verified.
 
 | Mode | Entry point | Tool count | Use when |
 |---|---|---|---|
-| Compound (default) | `src/server.py` | 39 tools | Most workflows — keeps context lean |
+| Compound (default) | `src/server.py` | 40 tools | Most workflows — keeps context lean |
 | Granular (full) | `src/server.py --full` | 390 tools | Power users needing one tool per API method |
 
 Resolve 21.1 adds [twelve read-only discovery controls](reference/resolve211-read-controls.md)
