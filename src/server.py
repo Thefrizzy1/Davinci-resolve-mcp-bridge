@@ -254,6 +254,11 @@ logger = logging.getLogger("resolve-mcp")
 # ─── MCP Server ───────────────────────────────────────────────────────────────
 
 from mcp.server.fastmcp import Context, FastMCP, Image
+from src.utils import edition_profile as _edition_profile
+
+# Free edition: the in-app bridge is the only transport (external scripting is
+# Studio-only), so set that before anything tries to connect.
+_edition_profile.apply_transport_defaults()
 from mcp import types as mcp_types
 mcp = FastMCP(
     "DaVinciResolveMCP",
@@ -262,13 +267,22 @@ mcp = FastMCP(
         "If no Resolve is running, tools launch one (up to 60s on the first call); "
         "if one is already running they never launch a second. "
         "On a connection error, read the error's own remediation field — it names the "
-        "fix that applies. External scripting is Studio-only, but the free edition is "
-        "reachable via the in-app bridge (Workspace > Scripts > resolve_bridge — it is "
-        "used automatically when external scripting is unavailable; "
-        "DAVINCI_RESOLVE_BRIDGE=1 only forces it), so a connection error does NOT mean "
-        "the free edition is unsupported — on Resolve 21.0.x. Resolve 21.1 moved Python "
-        "scripting to Studio and free 21.1 no longer lists Python scripts in that menu "
-        "(issue #203), so on 21.1+ a free-edition connection error may be final. "
+        "fix that applies. "
+        + (
+            "This server is set to the FREE edition: it talks to Resolve only through the "
+            "in-app bridge (Workspace > Scripts > resolve_bridge must be running) and "
+            "Studio-only actions (Neural Engine transcription, subtitles, magic mask, "
+            "voice isolation, scene cuts, smart reframe…) are refused before reaching "
+            "Resolve — use local_ai for transcription instead. "
+            if _edition_profile.edition() == "free" else
+            "External scripting is Studio-only, but the free edition is "
+            "reachable via the in-app bridge (Workspace > Scripts > resolve_bridge — it is "
+            "used automatically when external scripting is unavailable; "
+            "DAVINCI_RESOLVE_BRIDGE=1 only forces it), so a connection error does NOT mean "
+            "the free edition is unsupported — on Resolve 21.0.x. Resolve 21.1 moved Python "
+            "scripting to Studio and free 21.1 no longer lists Python scripts in that menu "
+            "(issue #203), so on 21.1+ a free-edition connection error may be final. "
+        ) +
         "When the user asks to send something as a bug or feature request, draft it "
         "with resolve_control(action='report_issue') — it returns a prefilled GitHub "
         "issue link for the user to review and submit; nothing is filed for them."
@@ -412,7 +426,7 @@ Core pattern:
 - Do not silently downgrade media analysis. Source-safe does not mean no visuals, no transcription, no persistence, no metadata, or no markers. For Resolve-target media analysis, keep visual analysis, transcription, persisted artifacts, metadata writeback, and Media Pool marker writeback enabled unless the user explicitly opts out. Vision uses host_chat_paths by default: analyze actions return absolute frame_paths in a deferred payload; you must read those frames as images and call media_analysis(action="commit_vision", ...) to finalize. Not completing commit_vision leaves the analysis in pending_host_vision_analysis — that is a failure mode, not a success.
 
 Local models (LM Studio, Ollama, or any model that cannot open image or audio files itself):
-- Use local_ai instead of host_chat_paths vision: local_ai(action="describe", params={"clip_name": ...}) returns a plain-text description from the local vision model, and local_ai(action="transcribe", ...) returns the spoken text. local_ai(action="status") says what is installed.
+- Use local_ai instead of host_chat_paths vision: local_ai(action="describe", params={"clip_name": ...}) returns a plain-text description from the local vision model, and local_ai(action="transcribe", ...) returns the spoken text. local_ai(action="status") says what is installed. Transcription of a long clip returns status "running" with a job_id after ~25 s — that is normal, not a failure: call local_ai(action="job_status", params={"job_id": ...}) until status is "done".
 - motion_graphics renders titles, lower thirds, captions, counters and three.js 3D scenes (Remotion) and imports them into Resolve: list_templates, then render(template, props, import_to_resolve=true, track_index=2).
 
 Visual feedback:
@@ -1700,6 +1714,12 @@ def _guard_missing_params(fn):
         async def wrapper(*args, **kwargs):
             action = _guarded_action_name(args, kwargs)
             params = _guarded_params(args, kwargs)
+            blocked = _edition_profile.refusal(tool_name, action)
+            if blocked:
+                return _build_operation_envelope(tool_name, action, params, _err(
+                    blocked, code="STUDIO_ONLY", category="unsupported",
+                    remediation="Use the free-edition alternative, or set the edition to studio "
+                                "(python install.py, or DAVINCI_RESOLVE_MCP_EDITION=studio)."), duration_ms=0)
             lifecycle = _execution_lifecycle.get_lifecycle_pipeline()
             ctx = _execution_lifecycle.ToolCallContext(
                 tool_name=tool_name,
@@ -1730,6 +1750,12 @@ def _guard_missing_params(fn):
         def wrapper(*args, **kwargs):
             action = _guarded_action_name(args, kwargs)
             params = _guarded_params(args, kwargs)
+            blocked = _edition_profile.refusal(tool_name, action)
+            if blocked:
+                return _build_operation_envelope(tool_name, action, params, _err(
+                    blocked, code="STUDIO_ONLY", category="unsupported",
+                    remediation="Use the free-edition alternative, or set the edition to studio "
+                                "(python install.py, or DAVINCI_RESOLVE_MCP_EDITION=studio)."), duration_ms=0)
             lifecycle = _execution_lifecycle.get_lifecycle_pipeline()
             ctx = _execution_lifecycle.ToolCallContext(
                 tool_name=tool_name,
@@ -33650,7 +33676,8 @@ def knowledge(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str,
 # files or audio themselves: the server listens/looks and hands back plain text.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_LOCAL_AI_ACTIONS = ["status", "transcribe", "describe", "analyze"]
+_LOCAL_AI_ACTIONS = ["status", "transcribe", "describe", "analyze", "job_status", "jobs"]
+_LOCAL_AI_WAIT_SECONDS = 25.0
 
 
 def _local_ai_clip_by_name(name: str):
@@ -33713,27 +33740,69 @@ def _local_ai_add_markers(clip, segments, color: str) -> int:
     return added
 
 
+def _local_ai_finish(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape a finished job like a direct call, running its Resolve writes once.
+
+    The Whisper/vision work runs on a worker thread that never touches Resolve;
+    SRT import and clip markers happen here, on the tool call that collects it.
+    """
+    from src.utils import local_ai as _local_ai
+
+    if job["status"] == "error":
+        return _err(job.get("error") or "local AI job failed", code="LOCAL_AI_FAILED", category="precondition",
+                    state={"job_id": job["id"]})
+    if job["status"] != "done":
+        out = dict(job)
+        out.update(success=True, job_id=job["id"], note=(
+            "Still working. Call local_ai(action='job_status', params={'job_id': '%s'}) — it waits up to "
+            "25 s per call, so poll it again until status is 'done'." % job["id"]))
+        return out
+    private = _local_ai.job_private(job["id"])
+    result = dict(job["result"] or {})
+    transcript = result.get("transcript") if "transcript" in result else (
+        result if result.get("backend") == "faster_whisper" else None)
+    if transcript is not None and not private.get("post_done"):
+        private["post_done"] = True
+        if private.get("import_srt") and transcript.get("srt_path"):
+            _, _, mp, mp_err = _get_mp()
+            transcript["srt_imported"] = bool(mp.ImportMedia([transcript["srt_path"]])) if not mp_err else False
+        clip = private.get("clip")
+        if private.get("add_markers") and clip is not None:
+            transcript["markers_added"] = _local_ai_add_markers(
+                clip, transcript["segments"], private.get("marker_color") or "Blue")
+        private["final"] = result
+    result = private.get("final", result)
+    result.setdefault("success", True)
+    result["job_id"] = job["id"]
+    return result
+
+
 @mcp.tool()
 @_guard_missing_params
 def local_ai(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Local Whisper transcription and local vision — no cloud, no keys, no cost.
 
-    Target any action with ONE of: path (file on disk), clip_id, or clip_name (Media Pool).
+    Target transcribe/describe/analyze with ONE of: path (file on disk), clip_id, or
+    clip_name (Media Pool).
+
+    LONG WORK RUNS IN THE BACKGROUND. Each call waits up to wait_seconds (default 25)
+    and returns the result if it is done; otherwise it returns status "queued"/"running"
+    with a job_id. Then call job_status(job_id) — it waits again — until status is
+    "done". Jobs run one at a time, so start several and collect them in order.
 
     Actions:
       status() -> {transcription, vision, frame_extraction}  — what is installed/running.
       transcribe(target, model?, language?, word_timestamps?, translate?, write_srt?,
-                 import_srt?, add_markers?, marker_color?) -> {text, segments, srt_path?}
-        model: tiny|base|small|medium|large-v3|turbo (default base). translate=true -> English.
-        write_srt=true writes <file>.srt next to the media (or pass srt_path).
-        import_srt=true also imports that SRT into the Media Pool.
-        add_markers=true (clip targets) drops one marker per spoken segment on the clip.
+                 import_srt?, add_markers?, marker_color?, wait_seconds?) -> {text, segments}
+        model: tiny|base|small|medium|large-v3|turbo (default base). base/small are fast
+        on CPU; medium/large take minutes per clip on CPU and download 1.5-3 GB first.
+        translate=true -> English. write_srt=true writes <file>.srt next to the media;
+        import_srt=true also imports it; add_markers=true marks each spoken line on the clip.
       describe(target, prompt?, frames?, times?, model?) -> {description, frame_times}
         Samples frames (default 4) and asks the vision model loaded in LM Studio/Ollama.
-      analyze(target, ...) -> {transcript, vision}  — both of the above in one call.
-
-    Setup: requirements-local-ai.txt for Whisper; LM Studio server (port 1234) or
-    Ollama with a vision model (Qwen2.5-VL, Gemma 3, LLaVA…) for describe.
+      analyze(target, ...) -> {transcript, vision}  — both of the above.
+      job_status(job_id, wait_seconds?) -> the result when done, else progress (0-1).
+      jobs() -> every queued/running/finished job with progress.
     """
     from src.utils import local_ai as _local_ai
 
@@ -33742,48 +33811,59 @@ def local_ai(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
         return _local_ai.status()
     if action not in _LOCAL_AI_ACTIONS:
         return _unknown(action, _LOCAL_AI_ACTIONS)
+    wait = float(p.get("wait_seconds", _LOCAL_AI_WAIT_SECONDS))
+    try:
+        if action == "jobs":
+            return {"success": True, "jobs": _local_ai.list_jobs()}
+        if action == "job_status":
+            return _local_ai_finish(_local_ai.wait_job(str(p["job_id"]), wait))
+    except _local_ai.LocalAIError as exc:
+        return _err(str(exc), code="UNKNOWN_JOB", category="invalid_input")
+    if action not in ("transcribe", "describe", "analyze"):
+        return _unknown(action, _LOCAL_AI_ACTIONS)
 
     file_path, clip, err = _local_ai_resolve_target(p)
     if err:
         return err
-    out: Dict[str, Any] = {"success": True, "file_path": file_path}
-    try:
-        if action in ("transcribe", "analyze"):
-            srt_path = p.get("srt_path")
-            if not srt_path and (_coerce_bool(p.get("write_srt")) or _coerce_bool(p.get("import_srt"))):
-                srt_path = os.path.splitext(file_path)[0] + ".srt"
-            transcript = _local_ai.transcribe(
-                file_path,
-                model=p.get("model") if action == "transcribe" else p.get("whisper_model"),
-                language=p.get("language"),
-                word_timestamps=_coerce_bool(p.get("word_timestamps")),
-                task="translate" if _coerce_bool(p.get("translate")) else "transcribe",
-                srt_path=srt_path,
-            )
-            if _coerce_bool(p.get("import_srt")) and transcript.get("srt_path"):
-                _, _, mp, mp_err = _get_mp()
-                imported = mp.ImportMedia([transcript["srt_path"]]) if not mp_err else None
-                transcript["srt_imported"] = bool(imported)
-            if _coerce_bool(p.get("add_markers")) and clip is not None:
-                transcript["markers_added"] = _local_ai_add_markers(
-                    clip, transcript["segments"], str(p.get("marker_color") or "Blue"))
-            out["transcript" if action == "analyze" else "result"] = transcript
-        if action in ("describe", "analyze"):
-            vision = _local_ai.describe(
-                file_path,
-                prompt=p.get("prompt"),
-                frames=int(p.get("frames", 4)),
-                times=p.get("times"),
-                model=p.get("model") if action == "describe" else p.get("vision_model"),
-            )
-            out["vision" if action == "analyze" else "result"] = vision
-    except _local_ai.LocalAIError as exc:
-        return _err(str(exc), code="LOCAL_AI_UNAVAILABLE", category="precondition")
-    if "result" in out:
-        result = out.pop("result")
-        result["file_path"] = file_path
-        return result
-    return out
+    if not os.path.isfile(file_path):
+        return _err(f"File not found: {file_path}", code="FILE_NOT_FOUND", category="invalid_input",
+                    remediation="The clip's media is offline or the path is wrong.")
+    srt_path = p.get("srt_path")
+    if not srt_path and (_coerce_bool(p.get("write_srt")) or _coerce_bool(p.get("import_srt"))):
+        srt_path = os.path.splitext(file_path)[0] + ".srt"
+    whisper_kwargs = dict(
+        model=p.get("model") if action == "transcribe" else p.get("whisper_model"),
+        language=p.get("language"),
+        word_timestamps=_coerce_bool(p.get("word_timestamps")),
+        task="translate" if _coerce_bool(p.get("translate")) else "transcribe",
+        srt_path=srt_path,
+    )
+    vision_kwargs = dict(
+        prompt=p.get("prompt"),
+        frames=int(p.get("frames", 4)),
+        times=p.get("times"),
+        model=p.get("model") if action == "describe" else p.get("vision_model"),
+    )
+
+    def work(progress):
+        if action == "transcribe":
+            return {**_local_ai.transcribe(file_path, on_progress=progress, **whisper_kwargs), "file_path": file_path}
+        if action == "describe":
+            progress("describing", 0.0)
+            return {**_local_ai.describe(file_path, **vision_kwargs), "file_path": file_path}
+        transcript = _local_ai.transcribe(
+            file_path, on_progress=lambda stage, f: progress(stage, f * 0.8), **whisper_kwargs)
+        progress("describing", 0.8)
+        return {"success": True, "file_path": file_path, "transcript": transcript,
+                "vision": _local_ai.describe(file_path, **vision_kwargs)}
+
+    job_id = _local_ai.start_job(action, os.path.basename(file_path), work, private={
+        "clip": clip,
+        "import_srt": _coerce_bool(p.get("import_srt")),
+        "add_markers": _coerce_bool(p.get("add_markers")),
+        "marker_color": str(p.get("marker_color") or "Blue"),
+    })
+    return _local_ai_finish(_local_ai.wait_job(job_id, wait))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -34231,6 +34311,9 @@ if __name__ == "__main__":
     # force on the first call, not the second.
     logger.info(f"Result envelope mode: {_apply_persisted_envelope_mode()}")
     start_background_update_check(VERSION, project_dir, logger, env=_setup_update_env())
+    _hidden = _edition_profile.apply_to_server(mcp)
+    logger.info(f"Profile: {_edition_profile.edition()} edition, {_edition_profile.toolset()} tool set"
+                + (f"; hidden tools: {', '.join(_hidden)}" if _hidden else ""))
     _install_threaded_tool_dispatch(mcp)
 
     # Support --full flag to run the 377-tool granular server instead

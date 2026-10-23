@@ -31,9 +31,15 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional
+import time
+import uuid
+from typing import Any, Callable, Dict, List, Optional
 
 DEFAULT_WHISPER_MODEL = "base"
+#: Written by install.py when it pre-downloads a model, so the server defaults
+#: to the model that is already on disk instead of fetching another one.
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".config", "davinci-resolve-mcp", "local_ai.json")
+WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v3", "turbo")
 DEFAULT_VISION_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_VISION_PROMPT = (
     "These are frames sampled in order from one video clip. Describe the clip for "
@@ -61,6 +67,20 @@ class LocalAIError(Exception):
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     value = os.environ.get(name, "").strip()
     return value or default
+
+
+def _settings() -> Dict[str, Any]:
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def default_whisper_model() -> str:
+    return (_env("DAVINCI_RESOLVE_MCP_WHISPER_MODEL") or str(_settings().get("whisper_model") or "")
+            or DEFAULT_WHISPER_MODEL)
 
 
 def vision_base_url() -> str:
@@ -103,7 +123,7 @@ def status() -> Dict[str, Any]:
         "transcription": {
             "available": whisper_ok,
             "backend": "faster_whisper",
-            "default_model": _env("DAVINCI_RESOLVE_MCP_WHISPER_MODEL", DEFAULT_WHISPER_MODEL),
+            "default_model": default_whisper_model(),
             "loaded_models": [f"{name} ({device})" for name, device, _ in _whisper_models],
             **({} if whisper_ok else {"install": "venv/bin/pip install -r requirements-local-ai.txt"}),
         },
@@ -159,13 +179,21 @@ def transcribe(
     vad_filter: bool = True,
     srt_path: Optional[str] = None,
     task: str = "transcribe",
+    on_progress: Optional[Callable[[str, float], None]] = None,
 ) -> Dict[str, Any]:
-    """Transcribe an audio or video file. Returns text, timed segments and optional SRT."""
+    """Transcribe an audio or video file. Returns text, timed segments and optional SRT.
+
+    ``on_progress(stage, fraction)`` is called with "loading_model" (the first
+    use of a model downloads it) and then "transcribing" as segments decode.
+    """
     if not path or not os.path.isfile(path):
         raise LocalAIError(f"File not found: {path!r}")
-    model = model or _env("DAVINCI_RESOLVE_MCP_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
+    model = model or default_whisper_model()
     device = _env("DAVINCI_RESOLVE_MCP_WHISPER_DEVICE", "auto")
+    report = on_progress or (lambda stage, fraction: None)
+    report("loading_model", 0.0)
     whisper = _load_whisper(model, device, "int8" if device == "cpu" else "auto")
+    report("transcribing", 0.0)
     raw_segments, info = whisper.transcribe(
         path,
         language=language or None,
@@ -175,6 +203,8 @@ def transcribe(
     )
     segments: List[Dict[str, Any]] = []
     for seg in raw_segments:  # a generator: decoding happens here
+        if info.duration:
+            report("transcribing", min(0.999, seg.end / info.duration))
         entry: Dict[str, Any] = {"start": round(seg.start, 3), "end": round(seg.end, 3), "text": seg.text.strip()}
         if word_timestamps and seg.words:
             entry["words"] = [
@@ -344,3 +374,98 @@ def describe(
         "frame_times": [at for at, _ in sampled],
         "description": str(text).strip(),
     }
+
+
+# ─── Background jobs ─────────────────────────────────────────────────────────
+#
+# Whisper on a long clip (or a first run that downloads the model) takes far
+# longer than an MCP client waits for one tool call — LM Studio gives up after
+# about a minute. Work therefore runs on a background thread; the tool waits a
+# little, then hands back a job id to poll. One job runs at a time (they share
+# the CPU/GPU and the model cache); the rest queue.
+
+MAX_JOB_AGE_SECONDS = 6 * 3600
+_jobs: Dict[str, Dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+_worker_slot = threading.Semaphore(1)
+
+
+def _prune_jobs() -> None:
+    now = time.time()
+    for job_id in [k for k, j in _jobs.items()
+                   if j["status"] in ("done", "error") and now - (j["ended_at"] or now) > MAX_JOB_AGE_SECONDS]:
+        _jobs.pop(job_id, None)
+
+
+def start_job(kind: str, label: str, work: Callable[[Callable[[str, float], None]], Dict[str, Any]],
+              private: Optional[Dict[str, Any]] = None) -> str:
+    """Queue ``work(progress)`` and return its job id immediately."""
+    job_id = uuid.uuid4().hex[:8]
+    with _jobs_lock:
+        _prune_jobs()
+        _jobs[job_id] = {
+            "id": job_id, "kind": kind, "label": label, "status": "queued", "stage": "queued",
+            "progress": 0.0, "result": None, "error": None, "created_at": time.time(),
+            "started_at": None, "ended_at": None, "_private": private or {},
+        }
+
+    def progress(stage: str, fraction: float) -> None:
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if job is not None:
+                job["stage"] = stage
+                job["progress"] = round(float(fraction), 3)
+
+    def run() -> None:
+        with _worker_slot:
+            with _jobs_lock:
+                _jobs[job_id].update(status="running", stage="starting", started_at=time.time())
+            try:
+                result = work(progress)
+                update = {"status": "done", "stage": "done", "progress": 1.0, "result": result}
+            except LocalAIError as exc:
+                update = {"status": "error", "stage": "error", "error": str(exc)}
+            except Exception as exc:  # noqa: BLE001 — surfaced to the caller via job_status
+                update = {"status": "error", "stage": "error", "error": f"{type(exc).__name__}: {exc}"}
+            with _jobs_lock:
+                _jobs[job_id].update(ended_at=time.time(), **update)
+
+    threading.Thread(target=run, name=f"local-ai-{job_id}", daemon=True).start()
+    return job_id
+
+
+def _public_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    out = {k: v for k, v in job.items() if not k.startswith("_")}
+    start = job["started_at"] or job["created_at"]
+    out["elapsed_seconds"] = round((job["ended_at"] or time.time()) - start, 1)
+    if job["status"] == "queued":
+        with _jobs_lock:
+            out["queue_position"] = sum(
+                1 for j in _jobs.values() if j["status"] in ("queued", "running") and j["created_at"] < job["created_at"])
+    return out
+
+
+def wait_job(job_id: str, seconds: float) -> Dict[str, Any]:
+    """Block up to ``seconds`` for the job to finish; return its public snapshot."""
+    deadline = time.time() + max(0.0, float(seconds))
+    while True:
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if job is None:
+                raise LocalAIError(f"Unknown job_id {job_id!r} (finished jobs are kept for 6 hours).")
+            finished = job["status"] in ("done", "error")
+        if finished or time.time() >= deadline:
+            return _public_job(job)
+        time.sleep(0.25)
+
+
+def job_private(job_id: str) -> Dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        return job["_private"] if job is not None else {}
+
+
+def list_jobs() -> List[Dict[str, Any]]:
+    with _jobs_lock:
+        jobs = sorted(_jobs.values(), key=lambda j: j["created_at"])
+    return [_public_job(j) for j in jobs]

@@ -1472,6 +1472,72 @@ def install_local_ai_extras(python_path, project_dir, dry_run=False):
         return False, tail[0]
 
 
+WHISPER_MODEL_CHOICES = [
+    # (name, download size, note)
+    ("tiny", "75 MB", "fastest, rough"),
+    ("base", "145 MB", "fast on any CPU — default"),
+    ("small", "485 MB", "good balance on CPU"),
+    ("medium", "1.5 GB", "accurate; slow on CPU, fine on a GPU"),
+    ("large-v3", "3 GB", "most accurate; wants a GPU"),
+    ("turbo", "1.6 GB", "near-large accuracy, much faster; best with a GPU"),
+]
+
+
+def prompt_whisper_model(default="base"):
+    """Interactive model picker; returns a model name."""
+    print(f"\n  Which Whisper model should be downloaded now?\n")
+    for i, (name, size, note) in enumerate(WHISPER_MODEL_CHOICES, 1):
+        print(f"    {cyan(str(i))}. {name:<9} {dim(size):<18} {dim(note)}")
+    try:
+        answer = input(f"\n  Select [{default}]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    names = [c[0] for c in WHISPER_MODEL_CHOICES]
+    if answer.isdigit() and 1 <= int(answer) <= len(names):
+        return names[int(answer) - 1]
+    return answer if answer in names else default
+
+
+def download_whisper_model(python_path, model, dry_run=False):
+    """Download a Whisper model into the Hugging Face cache and make it the default.
+
+    Output is not captured, so the download progress bars show in the terminal.
+    Returns (ok, message).
+    """
+    if dry_run:
+        return True, f"would download Whisper model '{model}'"
+    script = (
+        "import sys\n"
+        "from faster_whisper import download_model\n"
+        "try:\n"
+        "    print(download_model(sys.argv[1]))\n"
+        "except Exception as exc:\n"
+        "    print(f'  {type(exc).__name__}: {exc}', file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+    )
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run([str(python_path), "-c", script, model], env=env, stdout=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        return False, (f"download of '{model}' failed — it will be fetched on first use instead "
+                       "(check your internet connection or huggingface.co access)")
+    settings_path = home() / ".config" / "davinci-resolve-mcp" / "local_ai.json"
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = {}
+        settings["whisper_model"] = model
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    except OSError as exc:
+        return True, f"'{model}' downloaded, but the default could not be saved ({exc})"
+    return True, f"'{model}' downloaded and set as the default ({result.stdout.strip().splitlines()[-1]})"
+
+
 def provision_motion_graphics(project_dir, dry_run=False):
     """Install the optional Remotion + Three.js motion-graphics extra.
 
@@ -1586,7 +1652,7 @@ def access_violation_message(returncode, version=None):
     return text
 
 
-def verify_resolve_connection(python_path, api_path, lib_path):
+def verify_resolve_connection(python_path, api_path, lib_path, bridge_only=False):
     """Probe Resolve without exposing short-lived children to Fusion teardown.
 
     The persistent bridge is tried before Blackmagic's native scripting module.
@@ -1594,11 +1660,14 @@ def verify_resolve_connection(python_path, api_path, lib_path):
     result and hard-exits after any native import attempt so fusionscript's
     background RemoteApp thread cannot race CPython finalization.
     """
-    if not api_path:
+    if not api_path and not bridge_only:
         return False, "Resolve API path not found"
 
     env = {**os.environ, **build_server_env(python_path, api_path, lib_path)}
-    modules_path = env["PYTHONPATH"]
+    if bridge_only:
+        # Free edition: probe the in-app bridge only; never external scripting.
+        env["DAVINCI_RESOLVE_BRIDGE"] = "1"
+    modules_path = env.get("PYTHONPATH", "")
     repo_root = str(Path(__file__).resolve().parent)
     test_script = textwrap.dedent(f"""\
         import os
@@ -1606,6 +1675,7 @@ def verify_resolve_connection(python_path, api_path, lib_path):
         sys.path.insert(0, {modules_path!r})
         sys.path.insert(0, {repo_root!r})
         native_import_attempted = False
+        BRIDGE_ONLY = {bool(bridge_only)!r}
         try:
             try:
                 from src.utils.resolve_connection import connect_resolve
@@ -1616,6 +1686,9 @@ def verify_resolve_connection(python_path, api_path, lib_path):
             if connect_resolve is not None:
                 resolve = connect_resolve(None)
 
+            if resolve is None and BRIDGE_ONLY:
+                print("BRIDGE_NOT_RUNNING", flush=True)
+                sys.exit(0)
             if resolve is None:
                 native_import_attempted = True
                 import DaVinciResolveScript as dvr
@@ -2211,6 +2284,7 @@ def main():
             Examples:
               python install.py                            Interactive mode
               python install.py --lmstudio --local-ai      LM Studio + Whisper, no prompts
+              python install.py --local-ai --whisper-model small   pick the Whisper model
               python install.py --motion                   Add Remotion + Three.js motion graphics
               python install.py --clients all              Configure all clients
               python install.py --clients cursor,claude-desktop
@@ -2234,8 +2308,21 @@ def main():
         help="Install the local AI extras (faster-whisper) without asking"
     )
     parser.add_argument(
+        "--whisper-model", type=str, default=None,
+        choices=["tiny", "base", "small", "medium", "large-v3", "turbo", "none"],
+        help="Whisper model to download during install (default: ask, or 'base' non-interactively; 'none' skips)"
+    )
+    parser.add_argument(
         "--no-local-ai", action="store_true",
         help="Skip the local AI extras without asking"
+    )
+    parser.add_argument(
+        "--edition", choices=["free", "studio"], default=None,
+        help="Your DaVinci Resolve edition. 'free' = bridge only, Studio-only actions removed"
+    )
+    parser.add_argument(
+        "--toolset", choices=["full", "resolve"], default=None,
+        help="'resolve' = only the Resolve-control tools (no local_ai/motion_graphics/knowledge)"
     )
     parser.add_argument(
         "--motion", action="store_true",
@@ -2345,7 +2432,44 @@ def main():
     else:
         print(f"  Resolve:   {yellow('Not running')} {dim('(start Resolve to verify connection)')}")
 
-    if not api_path:
+    # ── Edition & tool set ──
+    from src.utils import edition_profile
+
+    edition = args.edition
+    if edition is None:
+        guess = "studio" if is_mac() and Path("/Applications/DaVinci Resolve/DaVinci Resolve Studio.app").exists() else "free"
+        if interactive:
+            print(f"\n  Which DaVinci Resolve do you have?")
+            print(f"    {cyan('1')}. Free     {dim('connects through the in-app bridge; Studio-only actions are removed')}")
+            print(f"    {cyan('2')}. Studio   {dim('external scripting + every action')}")
+            try:
+                answer = input(f"  Select [{'1' if guess == 'free' else '2'}]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            edition = {"1": "free", "free": "free", "2": "studio", "studio": "studio"}.get(answer, guess)
+        else:
+            edition = edition_profile.edition()
+    toolset = args.toolset
+    if toolset is None:
+        if interactive:
+            print(f"\n  Which tools should the AI see?")
+            print(f"    {cyan('1')}. Everything        {dim('Resolve control + local_ai, motion_graphics, knowledge')}")
+            print(f"    {cyan('2')}. Resolve only      {dim('just the Resolve tools — smaller, better for small local models')}")
+            try:
+                answer = input(f"  Select [1]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            toolset = "resolve" if answer in ("2", "resolve") else "full"
+        else:
+            toolset = edition_profile.toolset()
+    free_edition = edition == "free"
+    if not args.dry_run:
+        edition_profile.save(edition, toolset)
+    print(f"  Edition:   {bold(edition)}"
+          + (f" {dim('(bridge only — external scripting is never used; Studio-only actions removed)')}" if free_edition else ""))
+    print(f"  Tools:     {bold('Resolve only' if toolset == 'resolve' else 'everything')}")
+
+    if not api_path and not free_edition:
         print(f"\n  {yellow('Warning:')} Could not auto-detect DaVinci Resolve installation.")
         print(f"  The installer will continue, but you may need to set RESOLVE_SCRIPT_API manually.")
         if interactive and not prompt_yes_no("Continue anyway?"):
@@ -2480,13 +2604,19 @@ def main():
     elif args.local_ai:
         want_local_ai = True
     elif interactive:
-        print(f"  {dim('Adds faster-whisper (~100 MB + model on first use). Vision uses LM Studio/Ollama.')}")
+        print(f"  {dim('Adds faster-whisper (~100 MB) and downloads a Whisper model now. Vision uses LM Studio/Ollama.')}")
         want_local_ai = prompt_yes_no("Install local AI extras?")
     else:
         want_local_ai = False
     if want_local_ai:
         ok, message = install_local_ai_extras(python_path, project_dir, dry_run=args.dry_run)
         print(f"  Whisper:   {green(message) if ok else yellow(message)}")
+        if ok:
+            model = args.whisper_model or (prompt_whisper_model() if interactive else "base")
+            if model != "none":
+                print(f"  Model:     downloading '{model}'…")
+                ok, message = download_whisper_model(python_path, model, dry_run=args.dry_run)
+                print(f"  Model:     {green(message) if ok else yellow(message)}")
     else:
         print(f"  Whisper:   {dim('skipped (pip install -r requirements-local-ai.txt any time)')}")
 
@@ -2620,7 +2750,17 @@ def main():
         print_step(8, total_steps, "Verification")
 
     verification_failed = False
-    if api_path:
+    if free_edition:
+        success, message = verify_resolve_connection(python_path, api_path, lib_path, bridge_only=True)
+        if success:
+            print(f"  Connected: {green(message)} {dim('(via the in-app bridge)')}")
+        elif "BRIDGE_NOT_RUNNING" in message or "Cannot reach the in-Resolve bridge" in message:
+            print(f"  Bridge:    {yellow('Not running yet')} — this is expected right after installing.")
+            print(f"             Restart Resolve, open a project, then Workspace > Scripts > resolve_bridge.")
+        else:
+            print(f"  Bridge:    {yellow(message)}")
+            print(f"             Restart Resolve, open a project, then Workspace > Scripts > resolve_bridge.")
+    elif api_path:
         success, message = verify_resolve_connection(python_path, api_path, lib_path)
         try:
             py_abi_risk = is_abi_risk_python_version(_version_for_python(python_path))
@@ -2725,7 +2865,11 @@ def main():
             print(f"  Configured: {', '.join(configured)}")
         print()
         print(f"  {bold('Next steps:')}")
-        if not resolve_running:
+        if free_edition:
+            print(f"    1. Restart DaVinci Resolve and open a project")
+            print(f"    2. Workspace > Scripts > resolve_bridge  {dim('(every time you start Resolve)')}")
+            print(f"    3. Open your MCP client and start talking to Resolve")
+        elif not resolve_running:
             print(f"    1. Start DaVinci Resolve")
             print(f"    2. Open your MCP client")
             print(f"    3. Start using natural language to control Resolve!")

@@ -88,6 +88,30 @@ class LocalAITest(unittest.TestCase):
             with self.assertRaises(local_ai.LocalAIError):
                 local_ai.pick_vision_model()
 
+    def test_background_jobs_queue_and_report_progress(self):
+        release = threading.Event()
+
+        def work(progress):
+            progress("transcribing", 0.5)
+            release.wait(5)
+            return {"text": "done"}
+
+        first = local_ai.start_job("transcribe", "a", work)
+        second = local_ai.start_job("transcribe", "b", lambda progress: {"text": "second"})
+        snap = local_ai.wait_job(first, 0.3)
+        self.assertEqual((snap["status"], snap["progress"]), ("running", 0.5))
+        self.assertEqual(local_ai.wait_job(second, 0)["status"], "queued")
+        release.set()
+        self.assertEqual(local_ai.wait_job(first, 5)["result"], {"text": "done"})
+        self.assertEqual(local_ai.wait_job(second, 5)["result"], {"text": "second"})
+
+    def test_failed_job_reports_error(self):
+        def work(progress):
+            raise local_ai.LocalAIError("no model")
+
+        job = local_ai.wait_job(local_ai.start_job("transcribe", "x", work), 5)
+        self.assertEqual((job["status"], job["error"]), ("error", "no model"))
+
 
 if __name__ == "__main__":
     unittest.main()

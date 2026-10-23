@@ -21,17 +21,21 @@ python install.py
 
 The installer runs these steps in order:
 
-1. Finds Resolve and creates a `venv/` with the dependencies.
-2. **Always installs the in-app bridge** into Resolve's `Scripts/Utility` folders. You need it on the free edition. On Studio it does no harm.
-3. Asks whether to install the **local AI extras** (faster-whisper).
-4. Asks whether to install the **motion graphics extra** (Remotion + Three.js). The default answer is no, since many people already have their own setup.
-5. Asks **"Install straight into LM Studio?"**, which writes `~/.lmstudio/mcp.json`. After that you can pick any other clients.
-6. Checks the connection to Resolve.
+1. Finds Resolve and asks two questions:
+   - **Which edition do you have, Free or Studio?** Free means the server talks to Resolve only through the in-app bridge, never through external scripting (a Studio feature), and Studio-only actions are removed. See [Free vs Studio](#free-vs-studio).
+   - **Which tools should the AI see?** *Everything*, or *Resolve only*. Resolve only drops `local_ai`, `motion_graphics` and `knowledge`, which keeps the tool list small for local models.
+2. Creates a `venv/` with the dependencies.
+3. **Always installs the in-app bridge** into Resolve's `Scripts/Utility` folders. You need it on the free edition. On Studio it does no harm.
+4. Asks whether to install the **local AI extras** (faster-whisper). If you say yes, you pick a Whisper model and the installer **downloads it right away**, so the first transcription doesn't stall on a download.
+5. Asks whether to install the **motion graphics extra** (Remotion + Three.js). The default answer is no, since many people already have their own setup.
+6. Asks **"Install straight into LM Studio?"**, which writes `~/.lmstudio/mcp.json`. After that you can pick any other clients.
+7. Checks the connection to Resolve (through the bridge on the free edition).
 
 To run it without the prompts:
 
 ```bash
-python install.py --lmstudio --local-ai          # LM Studio + Whisper
+python install.py --lmstudio --edition free --toolset resolve   # free edition, Resolve tools only
+python install.py --lmstudio --local-ai --whisper-model small    # LM Studio + Whisper, download "small"
 python install.py --motion                       # add Remotion + Three.js motion graphics
 python install.py --clients lmstudio,cursor      # several clients
 python install.py --clients manual               # just print the JSON config
@@ -69,7 +73,8 @@ local_ai(action="analyze",    params={"clip_name": "A001_C003"})   # both at onc
   - `import_srt` also brings that `.srt` into the Media Pool.
   - `add_markers` puts one marker per spoken line on the clip.
   - `translate: true` outputs English.
-  - The model downloads once on first use. The default is `base`; you can also use `tiny`, `small`, `medium`, `large-v3` or `turbo`.
+  - The installer downloads the model you choose and makes it the default. `base` and `small` are quick on a CPU. `medium`, `large-v3` and `turbo` are much more accurate but take minutes per clip without a GPU.
+- **Long jobs run in the background.** Each call waits up to 25 seconds. If the work isn't finished by then, the call returns a `job_id` and a progress value, and `local_ai(action="job_status", params={"job_id": ...})` collects the result (it waits too). This means LM Studio's tool timeout never cuts a transcription off. Jobs run one at a time, so you can start several clips and collect them in order. `jobs` lists them all.
 - **Describe:** pulls a few frames (with ffmpeg, or OpenCV as a fallback) and sends them to the vision model loaded in **LM Studio** (default `http://127.0.0.1:1234/v1`) or **Ollama**. Load a vision model first, for example Qwen2.5-VL, Gemma 3 or LLaVA. If you don't name a model, it picks a loaded vision model automatically.
 - The built-in `media_analysis` pipeline also uses faster-whisper as its first-choice transcription backend.
 
@@ -124,6 +129,20 @@ motion_graphics(action="still", params={"template": "Text3D", "props": {"text": 
 - The installer adds the server as `davinci-resolve` to `~/.lmstudio/mcp.json`. Any other servers already in that file stay as they are. Restart LM Studio after installing.
 - Use a model that's good at tool calling (for example Qwen 2.5/3 or Llama 3.1+ instruct) with a context of 16k or more, because the tool list is large.
 - You can run a text model for chat and a separate vision model for `local_ai describe` at the same time.
+
+## Free vs Studio
+
+| | Free (`--edition free`) | Studio (`--edition studio`) |
+|---|---|---|
+| Connection | In-app bridge only. External scripting is never tried. | External scripting, with the bridge as a fallback |
+| Studio-only actions | Removed. The AI gets a clear error instead. | Available |
+| `project_manager_cloud` (Blackmagic Cloud) | Hidden | Available |
+
+The removed actions are the Neural Engine and Studio features: Resolve's own transcription and subtitle generation, scene-cut detection, magic mask, smart reframe, voice isolation, IntelliSearch, slate analysis, speech generation, motion deblur, audio classification, Dolby Vision analysis and stereo 3D clips.
+
+They're blocked on purpose rather than just failing. On the free edition, such a call makes Resolve show an upgrade dialog, and **every** later call fails until you click it away. For transcription and subtitles, use `local_ai` instead.
+
+The choice is saved in `~/.config/davinci-resolve-mcp/profile.json`. Re-run the installer to change it. You can also override it with the environment variables `DAVINCI_RESOLVE_MCP_EDITION=free|studio` and `DAVINCI_RESOLVE_MCP_TOOLSET=full|resolve`. To hide any other tools, set `DAVINCI_RESOLVE_MCP_DISABLED_TOOLS=a,b`.
 
 ## Free edition (in-app bridge)
 
