@@ -29,6 +29,7 @@ import struct
 import subprocess
 import tempfile
 import threading
+import asyncio
 import time
 import zlib
 from typing import Dict, Any, Optional, List, Tuple
@@ -10318,6 +10319,60 @@ def _media_analysis_async_mode(p: Dict[str, Any], *, dry_run_explicit: bool = Tr
     if _media_analysis_bool(p.get("prefer_handle"), False):
         return MEDIA_ANALYSIS_ASYNC_QUEUED
     return None
+
+
+MEDIA_ANALYSIS_WAIT_SECONDS = 20.0
+
+
+def _media_analysis_auto_background(p: Dict[str, Any]) -> bool:
+    """Run analyze_* in the background unless the caller chose otherwise."""
+    if _media_analysis_bool(p.get("dry_run"), False):
+        return False
+    return not _has_any_param(p, "background", "async_job", "asyncJob", "prefer_handle", "preferHandle")
+
+
+def _media_analysis_wait_seconds(p: Dict[str, Any]) -> float:
+    raw = _first_param(p, "wait_seconds", "waitSeconds")
+    try:
+        return max(0.0, min(float(raw), 50.0)) if raw is not None else MEDIA_ANALYSIS_WAIT_SECONDS
+    except (TypeError, ValueError):
+        return MEDIA_ANALYSIS_WAIT_SECONDS
+
+
+async def _media_analysis_wait_for_job(project_root: str, job_id: str, seconds: float) -> Optional[Dict[str, Any]]:
+    """Long-poll a batch job: return its full status once it finishes, or a
+    compact "still running" answer after ``seconds`` — always inside an MCP
+    client's request timeout. None if the job cannot be read."""
+    from src.utils.media_analysis_jobs import TERMINAL_JOB_STATUSES
+
+    deadline = time.monotonic() + seconds
+    while True:
+        status = media_analysis_batch_job_status(project_root, job_id, include_clips=False, include_events=False)
+        if not isinstance(status, dict) or status.get("success") is False:
+            return None
+        job = status if "job_id" in status else (status.get("job") or {})
+        state = str(job.get("status") or "")
+        if not job:
+            return None
+        if state in TERMINAL_JOB_STATUSES:
+            full = media_analysis_batch_job_status(project_root, job_id, include_clips=True, include_events=False)
+            full["note"] = (
+                "Analysis finished. Read what was said with media_analysis(action='plan_story_beats', "
+                "params={'clip_id': ...}) — or use local_ai(action='transcribe') for inline timed text."
+            )
+            return full
+        if time.monotonic() >= deadline:
+            return {
+                "success": True,
+                "status": "running",
+                "job_id": job_id,
+                "job": {k: job.get(k) for k in ("status", "phase", "total_clips", "pending_clips", "running_clips",
+                                                "succeeded_clips", "failed_clips", "last_error") if k in job},
+                "note": (f"Still analysing — this is normal for long clips, not an error. Call "
+                         f"media_analysis(action='batch_job_status', params={{'job_id': '{job_id}'}}) "
+                         "again; it waits up to 20 s each time."),
+            }
+        await asyncio.sleep(1.0)
 
 
 def _media_analysis_target_dict(raw_target: Any, p: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -23986,6 +24041,10 @@ async def media_analysis(action: str, params: Optional[Dict[str, Any]] = None, c
             job_id = p.get("job_id") or p.get("jobId") or p.get("id")
             if not job_id:
                 return _err("batch_job_status requires job_id")
+            if _has_any_param(p, "wait_seconds", "waitSeconds") or not _has_any_param(p, "include_clips", "includeClips"):
+                waited = await _media_analysis_wait_for_job(project_root, str(job_id), _media_analysis_wait_seconds(p))
+                if waited is not None:
+                    return waited
             return media_analysis_batch_job_status(
                 project_root,
                 str(job_id),
@@ -24229,9 +24288,26 @@ async def media_analysis(action: str, params: Optional[Dict[str, Any]] = None, c
         # re-enter the tool with the rewritten action via await so the
         # handler chain restarts from the top.
         async_mode = _media_analysis_async_mode(p, dry_run_explicit=dry_run_explicit)
+        if async_mode is None and _media_analysis_auto_background(p):
+            # Default for real (non-dry-run) analysis: run it as a background job
+            # and wait briefly. Inline analysis of a long clip (Whisper + frames)
+            # outlasts every MCP client's request timeout (~60 s in LM Studio),
+            # which surfaced as "MCP error -32001: Request timed out" with the
+            # work silently continuing — or lost. background=false keeps the old
+            # inline behaviour.
+            async_mode = MEDIA_ANALYSIS_ASYNC_RUNNING
         if async_mode:
             p["_async_mode"] = async_mode
-            return await media_analysis("start_batch_job", p, ctx)
+            created = await media_analysis("start_batch_job", p, ctx)
+            if async_mode == MEDIA_ANALYSIS_ASYNC_RUNNING and isinstance(created, dict) and created.get("running"):
+                job_id = str((created.get("job") or {}).get("job_id") or "")
+                project_root = _media_analysis_plan_project_root(created)
+                if job_id and project_root:
+                    waited = await _media_analysis_wait_for_job(
+                        project_root, job_id, _media_analysis_wait_seconds(p))
+                    if waited is not None:
+                        return waited
+            return created
         action = "plan"
 
     if action == "coverage_report":
