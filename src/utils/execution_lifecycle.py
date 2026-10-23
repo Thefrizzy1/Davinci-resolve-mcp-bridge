@@ -241,6 +241,8 @@ class RiskClassificationHook(LifecycleHook):
         # Imports one newly rendered graphic and, optionally, appends it to a
         # track; nothing existing is altered and the source media is untouched.
         ("motion_graphics", "import"),
+        # Adds media files to the pool (skipping ones already there); nothing removed.
+        ("editor", "import"),
         # Per-item display properties: set them back and the item is as it was.
         ("timeline_item", "set_clip_enabled"),
         ("timeline_item", "set_name"),

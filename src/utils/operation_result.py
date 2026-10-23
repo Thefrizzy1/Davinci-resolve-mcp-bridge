@@ -293,10 +293,12 @@ def extract_changes(raw: Any) -> Optional[Dict[str, Any]]:
 # ─── Assembly ────────────────────────────────────────────────────────────────
 
 def is_passthrough(obj: Any) -> bool:
-    """MCP content objects (Image, TextContent, EmbeddedResource) go through as-is."""
-    return getattr(obj.__class__, "__name__", "") in {
-        "Image", "TextContent", "EmbeddedResource"
-    }
+    """MCP content objects (Image, TextContent, EmbeddedResource) — or a list of
+    them, e.g. a preview image plus its caption — go through as-is."""
+    names = {"Image", "ImageContent", "TextContent", "EmbeddedResource"}
+    if isinstance(obj, list) and obj:
+        return all(getattr(item.__class__, "__name__", "") in names for item in obj)
+    return getattr(obj.__class__, "__name__", "") in names
 
 
 def _requested_mode(params: Optional[Dict[str, Any]], fallback: Optional[str]) -> str:

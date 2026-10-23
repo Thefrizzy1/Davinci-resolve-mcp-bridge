@@ -143,7 +143,7 @@ motion_graphics(action="still", params={"template": "Text3D", "props": {"text": 
 | Env var | Purpose |
 |---|---|
 | `DAVINCI_RESOLVE_MCP_MOTION_PROJECT` / `_ENTRY` | Use your own Remotion project and entry file |
-| `DAVINCI_RESOLVE_MCP_MOTION_OUT` | Where renders go (default `motion-graphics/out/`) |
+| `DAVINCI_RESOLVE_MCP_MOTION_OUT` | Where renders go (default `Videos/Resolve MCP Motion` in your user folder) |
 | `DAVINCI_RESOLVE_MCP_MOTION_BROWSER` | Path to a Chrome or Chromium binary, if Remotion's download is blocked |
 | `DAVINCI_RESOLVE_MCP_MOTION_GL` | WebGL backend: `angle` (default on Mac and Windows), `swangle` (default on Linux), `egl` or `vulkan` |
 

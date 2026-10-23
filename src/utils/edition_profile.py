@@ -153,6 +153,9 @@ def apply_compact_output(fastmcp) -> int:
         inner, inner_async = tool.fn, getattr(tool, "is_async", False)
 
         def _compact(result):
+            if isinstance(result, list) and result and all(
+                    getattr(i.__class__, "__name__", "") in ("Image", "ImageContent", "TextContent") for i in result):
+                return result  # preview image + caption
             if isinstance(result, (dict, list)):
                 return _types.TextContent(type="text", text=_json.dumps(
                     result, separators=(",", ":"), ensure_ascii=False, default=str))

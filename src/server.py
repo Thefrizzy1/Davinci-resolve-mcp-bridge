@@ -33999,6 +33999,28 @@ def _motion_import(path: str, p) -> Dict[str, Any]:
     return out
 
 
+def _motion_deliver(result: Dict[str, Any], p, still: bool) -> Any:
+    """Hand a finished render back: path + how to view it; the frame itself for stills.
+
+    A chat cannot play a video, so renders report where the file is and, with
+    open=true, open it in the default player. A still also comes back as an
+    image, so a model that can see images can check the look before a full render.
+    """
+    from src.utils import motion_graphics as _mg
+
+    out = result.get("out")
+    if out and _coerce_bool(p.get("open")):
+        result["opened"] = _mg.open_file(out)
+    if out:
+        result["note"] = (f"Saved to {out}" + (" and opened." if result.get("opened") else
+                          ". Pass open=true to play it, or import_to_resolve=true to put it in Resolve."))
+    if still and out and os.path.isfile(out) and _coerce_bool(p.get("preview", True)):
+        caption = mcp_types.TextContent(type="text", text=json.dumps(
+            {k: v for k, v in result.items() if k in ("success", "out", "frame", "width", "height", "note")}))
+        return [caption, Image(path=out)]
+    return result
+
+
 def _motion_post(job: Dict[str, Any], p) -> Dict[str, Any]:
     """Run the import/placement a render asked for, once, after it finishes."""
     from src.utils import motion_graphics as _mg
@@ -34035,7 +34057,9 @@ def motion_graphics(action: str, params: Optional[Dict[str, Any]] = None) -> Dic
         (created if missing); at_playhead=true places it at the playhead.
         Renders still running after wait_seconds (default 90) return a job_id.
       still(template, props?, frame?, out_path?) -> {out}  — PNG preview of one frame.
-      job_status(job_id) -> {status, progress, result}  — also runs a pending import.
+      job_status(job_id) -> {status, progress, result}  — waits up to 20 s; also runs a pending import.
+      Every render takes open=true to play the finished file; stills come back as an image.
+      Renders save to ~/Videos/Resolve MCP Motion. Resolve does NOT need to be open to render.
       cancel(job_id)
       import(path, append_to_timeline?, track_index?, at_playhead?, record_frame?)
       studio(port?) -> {url}  — opens Remotion Studio for live editing/preview.
@@ -34058,7 +34082,13 @@ def motion_graphics(action: str, params: Optional[Dict[str, Any]] = None) -> Dic
         if action == "cancel":
             return _mg.cancel(str(p["job_id"]))
         if action == "job_status":
-            return _motion_post(_mg.job_status(str(p["job_id"])), p)
+            job = _motion_post(_mg.job_status(str(p["job_id"]), float(p.get("wait_seconds", _mg.DEFAULT_WAIT_SECONDS))), p)
+            if job.get("status") == "done":
+                out = (job.get("result") or {}).get("out") or job.get("out")
+                return _motion_deliver({"success": True, **(job.get("result") or {}), "job_id": job["id"],
+                                        **({"resolve": job["resolve"]} if job.get("resolve") else {})},
+                                       p, str(out or "").lower().endswith(".png"))
+            return job
         if action == "import":
             path = os.path.abspath(os.path.expanduser(str(p["path"])))
             if not os.path.isfile(path):
@@ -34098,16 +34128,19 @@ def motion_graphics(action: str, params: Optional[Dict[str, Any]] = None) -> Dic
             if not still else {},
         )
         job = _mg.wait(job_id, float(p.get("wait_seconds", 20 if still else _mg.DEFAULT_WAIT_SECONDS)))
-        if job["status"] == "running":
-            job["note"] = "Still rendering. Poll motion_graphics(action='job_status', params={'job_id': ...})."
+        if job["status"] in ("running", "queued"):
+            job["note"] = (f"Still {job['status']} — normal, not an error. Call motion_graphics(action='job_status', "
+                           f"params={{'job_id': '{job['id']}'}}); it waits 20 s. Do NOT call render again: the same "
+                           "request returns this same job.")
             return job
         job = _motion_post(job, p)
         if job["status"] != "done":
             return _err((job.get("result") or {}).get("error") or "render failed", code="RENDER_FAILED",
                         category="invalid_input", state=job,
                         remediation="Check the props against list_templates; the error is the renderer's own message.")
-        return {"success": True, **(job.get("result") or {}), "job_id": job["id"],
-                **({"resolve": job["resolve"]} if job.get("resolve") else {})}
+        result = {"success": True, **(job.get("result") or {}), "job_id": job["id"],
+                  **({"resolve": job["resolve"]} if job.get("resolve") else {})}
+        return _motion_deliver(result, p, still)
     except _mg.MotionError as exc:
         return _err(str(exc), code="MOTION_UNAVAILABLE", category="precondition")
     except _local_ai_errors() as exc:
@@ -34416,6 +34449,7 @@ def _editor_review_lines(tl, fps) -> List[str]:
 
 @mcp.tool()
 @_guard_missing_params
+@_destructive_op("editor")
 def editor(action: str, params: Optional[Dict[str, Any]] = None) -> Any:
     """Make an edit from raw footage in ~5 calls. USE THIS for cutting a video.
 

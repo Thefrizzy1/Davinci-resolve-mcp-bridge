@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -31,7 +32,16 @@ REPO = Path(__file__).resolve().parents[2]
 MOTION_DIR = REPO / "motion-graphics"
 RENDER_SCRIPT = MOTION_DIR / "render.mjs"
 CATALOG_PATH = MOTION_DIR / "templates.json"
-DEFAULT_WAIT_SECONDS = 90.0
+#: Must stay under MCP clients' request timeout (LM Studio ~60 s). At 90 s the
+#: client gave up first, the model retried, and every retry started another
+#: render — a feedback loop that ran for hours.
+DEFAULT_WAIT_SECONDS = 20.0
+#: A render (or a still) that runs longer than this is killed and reported with
+#: the renderer's own last output, instead of "running" forever.
+RENDER_TIMEOUT_SECONDS = float(os.environ.get("DAVINCI_RESOLVE_MCP_MOTION_TIMEOUT", "900"))
+STILL_TIMEOUT_SECONDS = 300.0
+#: An identical request finished this recently returns that file instead of rendering again.
+REUSE_SECONDS = 600.0
 MAX_JOB_AGE_SECONDS = 6 * 3600
 
 _jobs: Dict[str, Dict[str, Any]] = {}
@@ -59,8 +69,23 @@ def custom_project() -> Optional[Path]:
 
 
 def output_dir() -> Path:
+    """Where renders go: somewhere a person will actually look (~/Videos)."""
     value = _env("DAVINCI_RESOLVE_MCP_MOTION_OUT")
-    return Path(value).expanduser() if value else MOTION_DIR / "out"
+    return Path(value).expanduser() if value else Path.home() / "Videos" / "Resolve MCP Motion"
+
+
+def open_file(path: str) -> bool:
+    """Open a finished render in the system's default player/viewer."""
+    try:
+        if os.name == "nt":
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            subprocess.Popen([opener, path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except (OSError, AttributeError):
+        return False
 
 
 def bundled_installed() -> bool:
@@ -94,6 +119,7 @@ def status() -> Dict[str, Any]:
         "custom_project": str(project) if project else None,
         "output_dir": str(output_dir()),
         "running_jobs": [j["id"] for j in _jobs.values() if j["status"] == "running"],
+        "queued_jobs": [j["id"] for j in _jobs.values() if j["status"] == "queued"],
     }
     if not node:
         result["install"] = "Install Node.js 18.18+ (https://nodejs.org), then re-run install.py --motion."
@@ -178,10 +204,46 @@ def _prune() -> None:
         _jobs.pop(job_id, None)
 
 
+def _tail(path: str, lines: int = 8) -> str:
+    try:
+        return "\n".join(Path(path).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-lines:])
+    except OSError:
+        return ""
+
+
+def _pump() -> None:
+    """Start the oldest queued render when nothing is running (call under _lock).
+
+    One render at a time: Remotion already uses every core, and parallel
+    renders only made each one slower — which made clients time out and retry.
+    """
+    if any(j["status"] == "running" for j in _jobs.values()):
+        return
+    queued = sorted((j for j in _jobs.values() if j["status"] == "queued"), key=lambda j: j["created_at"])
+    if not queued:
+        return
+    job = queued[0]
+    spec = job.pop("_spec")
+    with open(job["_stdout"], "w", encoding="utf-8") as so, open(job["_stderr"], "w", encoding="utf-8") as se:
+        job["_proc"] = subprocess.Popen(spec["cmd"], cwd=spec["cwd"], stdout=so, stderr=se,
+                                        stdin=subprocess.DEVNULL, env=spec["env"])
+    job.update(status="running", started_at=time.time())
+
+
 def _finish(job: Dict[str, Any]) -> None:
     """Fold a finished child process into the job record (call under _lock)."""
     proc = job.get("_proc")
-    if job["status"] != "running" or proc is None or proc.poll() is None:
+    if job["status"] != "running" or proc is None:
+        return
+    if proc.poll() is None:
+        if time.time() - job["started_at"] > job["_timeout"]:
+            proc.kill()
+            job.update(status="error", ended_at=time.time(), result={
+                "success": False,
+                "error": (f"Render took longer than {job['_timeout'] / 60:g} min and was stopped. "
+                          f"Last renderer output:\n{_tail(job['_stderr']) or _tail(job['_stdout']) or '(none)'}"),
+            })
+            job.pop("_proc", None)
         return
     stdout = Path(job["_stdout"]).read_text(encoding="utf-8", errors="replace")
     stderr = Path(job["_stderr"]).read_text(encoding="utf-8", errors="replace")
@@ -205,7 +267,11 @@ def _public(job: Dict[str, Any]) -> Dict[str, Any]:
     if progress:
         out["stage"] = progress.get("stage")
         out["progress"] = round(float(progress.get("progress") or 0), 3)
-    out["elapsed_seconds"] = round((job.get("ended_at") or time.time()) - job["started_at"], 1)
+    started = job.get("started_at") or job["created_at"]
+    out["elapsed_seconds"] = round((job.get("ended_at") or time.time()) - started, 1)
+    if job["status"] == "queued":
+        out["queue_position"] = sum(1 for j in _jobs.values()
+                                    if j["status"] in ("queued", "running") and j["created_at"] < job["created_at"])
     return out
 
 
@@ -252,6 +318,17 @@ def start_render(
                           "(or: cd motion-graphics && npm install).")
     props = dict(props or {})
     still = still_frame is not None
+    key = json.dumps([template, props, out_path, codec, still_frame, scale, bool(alpha), str(project)],
+                     sort_keys=True, default=str)
+    with _lock:
+        for existing in _jobs.values():
+            if existing.get("_key") != key:
+                continue
+            if existing["status"] in ("queued", "running"):
+                return existing["id"]  # a retry of a request still in progress
+            if (existing["status"] == "done" and time.time() - (existing.get("ended_at") or 0) < REUSE_SECONDS
+                    and os.path.exists(existing["out"])):
+                return existing["id"]  # rendered moments ago: hand back the same file
     out = Path(out_path).expanduser().resolve() if out_path else _default_out(template, props, codec, still, alpha)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -291,16 +368,16 @@ def start_render(
     env = dict(os.environ)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
-    with open(stdout_path, "w", encoding="utf-8") as so, open(stderr_path, "w", encoding="utf-8") as se:
-        proc = subprocess.Popen(cmd, cwd=cwd, stdout=so, stderr=se, stdin=subprocess.DEVNULL, env=env)
     with _lock:
         _prune()
         _jobs[job_id] = {
-            "id": job_id, "template": template, "status": "running", "result": None, "out": str(out),
-            "started_at": time.time(), "ended_at": None, "extra": extra or {},
-            "_proc": proc, "_stdout": str(stdout_path), "_stderr": str(stderr_path),
-            "_progress": str(work / "progress.json"),
+            "id": job_id, "template": template, "status": "queued", "result": None, "out": str(out),
+            "created_at": time.time(), "started_at": None, "ended_at": None, "extra": extra or {},
+            "_key": key, "_spec": {"cmd": cmd, "cwd": cwd, "env": env},
+            "_timeout": STILL_TIMEOUT_SECONDS if still else RENDER_TIMEOUT_SECONDS,
+            "_stdout": str(stdout_path), "_stderr": str(stderr_path), "_progress": str(work / "progress.json"),
         }
+        _pump()
     return job_id
 
 
@@ -311,14 +388,17 @@ def wait(job_id: str, seconds: float = DEFAULT_WAIT_SECONDS) -> Dict[str, Any]:
             job = _jobs.get(job_id)
             if job is None:
                 raise MotionError(f"Unknown job_id {job_id!r}")
-            _finish(job)
-            if job["status"] != "running" or time.time() >= deadline:
+            for other in list(_jobs.values()):
+                _finish(other)
+            _pump()
+            if job["status"] not in ("running", "queued") or time.time() >= deadline:
                 return _public(job)
         time.sleep(0.25)
 
 
-def job_status(job_id: str) -> Dict[str, Any]:
-    return wait(job_id, 0)
+def job_status(job_id: str, seconds: float = DEFAULT_WAIT_SECONDS) -> Dict[str, Any]:
+    """Long-poll: waits up to ``seconds`` for the job to finish."""
+    return wait(job_id, seconds)
 
 
 def cancel(job_id: str) -> Dict[str, Any]:
@@ -331,6 +411,8 @@ def cancel(job_id: str) -> Dict[str, Any]:
             proc.terminate()
         job.update(status="cancelled", ended_at=time.time())
         job.pop("_proc", None)
+        job.pop("_spec", None)
+        _pump()
         return _public(job)
 
 
