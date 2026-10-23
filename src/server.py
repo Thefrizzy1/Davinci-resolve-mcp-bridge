@@ -34124,7 +34124,9 @@ def _local_ai_errors():
 # TOOL: editor — the whole edit in ~5 calls, compact text replies (local models)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_EDITOR_ACTIONS = ["footage", "transcribe", "sentences", "build", "review"]
+_EDITOR_ACTIONS = ["project", "import", "footage", "transcribe", "sentences", "build", "review"]
+_EDITOR_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".mxf", ".avi", ".m4v", ".webm", ".mts", ".braw",
+                            ".mp3", ".wav", ".aif", ".aiff", ".m4a", ".flac", ".aac", ".png", ".jpg", ".jpeg"}
 _EDITOR_STATE: Dict[str, Any] = {"clips": {}, "jobs": {}}
 _EDITOR_WAIT_SECONDS = 25.0
 
@@ -34247,6 +34249,77 @@ def _editor_transcribe(p) -> List[str]:
     return lines
 
 
+def _editor_project(p) -> List[str]:
+    r = get_resolve()
+    if r is None:
+        return [_not_connected_error()["error"]["message"]]
+    pm = r.GetProjectManager()
+    wanted = str(p["name"]).strip()
+    names = [str(n) for n in (pm.GetProjectListInCurrentFolder() or [])]
+    match = next((n for n in names if n.lower() == wanted.lower()), None)
+    if match:
+        current = pm.GetCurrentProject()
+        if current is not None and str(current.GetName()) == match:
+            proj = current
+        else:
+            proj = pm.LoadProject(match)
+        verb = "Opened"
+    else:
+        proj = pm.CreateProject(wanted)
+        verb = "Created"
+    if not proj:
+        return [f"Resolve could not open or create project {wanted!r}. Projects here: {', '.join(names) or 'none'}."]
+    _EDITOR_STATE["clips"] = {}
+    return [f"{verb} project {proj.GetName()!r}. Next: editor(action='import', params={{'folder': ...}}) "
+            "if the footage is not in it yet, else editor(action='footage')."]
+
+
+def _editor_import(p) -> List[str]:
+    folder = os.path.abspath(os.path.expanduser(str(p["folder"]).strip().strip('"')))
+    if not os.path.isdir(folder):
+        return [f"Folder not found: {folder}"]
+    files = []
+    for root, _, names in os.walk(folder):
+        for name in sorted(names):
+            if os.path.splitext(name)[1].lower() in _EDITOR_MEDIA_EXTENSIONS and not name.startswith("."):
+                files.append(os.path.join(root, name))
+    if not files:
+        return [f"No media files in {folder}."]
+    clips, err = _editor_scan()
+    if err:
+        return [err["error"]["message"]]
+    have = {os.path.normcase(os.path.abspath(c["path"])) for c in clips.values() if c["path"]}
+    new = [f for f in files if os.path.normcase(os.path.abspath(f)) not in have]
+    _, _, mp, err = _get_mp()
+    if err:
+        return [err["error"]["message"]]
+    imported = mp.ImportMedia(new) if new else []
+    count = len(imported or [])
+    lines = [f"Imported {count} of {len(new)} new files ({len(files) - len(new)} were already in the project)."]
+    if new and count < len(new):
+        lines.append("Some files were not imported (unsupported or offline).")
+    return lines + _editor_footage_lines(force=True)
+
+
+def _editor_footage_lines(force: bool = False) -> List[str]:
+    from src.utils import editor as _ed
+
+    if force or not _EDITOR_STATE["clips"]:
+        _, err = _editor_scan()
+        if err:
+            return [err["error"]["message"]]
+    clips = _EDITOR_STATE["clips"]
+    lines = []
+    for short in sorted(clips, key=lambda s: int(s[1:])):
+        c = clips[short]
+        tr = _ed.load_transcript(c["path"]) if c["path"] else None
+        rate = f"{c['fps']:g}fps" if c["fps"] else "audio"
+        lines.append(f"{short} {c['name']} | {c['kind']} | {_ed.fmt_seconds(c['duration'])} | {rate}"
+                     + (f" | transcribed ({len(tr['sentences'])} sentences)" if tr else ""))
+    lines.append("Next: editor(action='transcribe') until 'All done', then editor(action='sentences').")
+    return lines
+
+
 def _editor_build(p) -> List[str]:
     from src.utils import editor as _ed
 
@@ -34346,6 +34419,8 @@ def _editor_review_lines(tl, fps) -> List[str]:
 def editor(action: str, params: Optional[Dict[str, Any]] = None) -> Any:
     """Make an edit from raw footage in ~5 calls. USE THIS for cutting a video.
 
+    0. project(name) opens (or creates) a Resolve project; import(folder) adds every media
+       file in a folder (skips ones already in the project) and lists them.
     1. footage() -> one line per clip: c-number, name, kind, length, fps, transcribed?
     2. transcribe(clips?="speech", model?) -> local Whisper on every video clip, in the
        background; cached forever. If it says "still running", call it again.
@@ -34368,20 +34443,16 @@ def editor(action: str, params: Optional[Dict[str, Any]] = None) -> Any:
     p = _params(params)
     if action not in _EDITOR_ACTIONS:
         return _unknown(action, _EDITOR_ACTIONS)
-    if action == "footage" or not _EDITOR_STATE["clips"]:
-        clips, err = _editor_scan()
+    if action == "project":
+        return _editor_text(_editor_project(p))
+    if action == "import":
+        return _editor_text(_editor_import(p))
+    if action == "footage":
+        return _editor_text(_editor_footage_lines(force=True))
+    if not _EDITOR_STATE["clips"]:
+        _, err = _editor_scan()
         if err:
             return err
-        if action == "footage":
-            lines = []
-            for short in sorted(clips, key=lambda s: int(s[1:])):
-                c = clips[short]
-                tr = _ed.load_transcript(c["path"]) if c["path"] else None
-                rate = f"{c['fps']:g}fps" if c["fps"] else "audio"
-                lines.append(f"{short} {c['name']} | {c['kind']} | {_ed.fmt_seconds(c['duration'])} | {rate}"
-                             + (f" | transcribed ({len(tr['sentences'])} sentences)" if tr else ""))
-            lines.append("Next: editor(action='transcribe') for the speech clips, then sentences.")
-            return _editor_text(lines)
     if action == "transcribe":
         return _editor_text(_editor_transcribe(p))
     if action == "sentences":
