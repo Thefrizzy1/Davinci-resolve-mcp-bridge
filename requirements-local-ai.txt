@@ -7,3 +7,5 @@
 # Vision needs no Python package: it talks to LM Studio / Ollama over HTTP.
 # ffmpeg on PATH is recommended for pulling frames from video (opencv-python works too).
 faster-whisper>=1.1
+# PyAV 19 dropped av.open(metadata_errors=...), which faster-whisper still passes.
+av>=11,<19

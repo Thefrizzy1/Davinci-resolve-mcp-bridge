@@ -23140,6 +23140,12 @@ def _opt_number(value: Any) -> Optional[float]:
 async def media_analysis(action: str, params: Optional[Dict[str, Any]] = None, ctx: Optional[Context] = None) -> Dict[str, Any]:
     """Project-scoped media analysis and guarded metadata publishing.
 
+    JUST NEED WHAT WAS SAID, WITH TIMESTAMPS? Use local_ai(action="transcribe",
+    params={"clip_id": ...}) instead — it returns the text and timed segments
+    inline. analyze_* writes transcripts to report files and returns only counts;
+    read them afterwards with plan_story_beats(clip_id) or get_report.
+    transcription/vision accept true/false as shorthand for {"enabled": ...}.
+
     <when_to_use>
     - Lead any analysis flow with capabilities() + get_caps() to know what's available
       and what the current budget looks like.

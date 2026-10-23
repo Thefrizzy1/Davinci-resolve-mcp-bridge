@@ -134,10 +134,44 @@ def status() -> Dict[str, Any]:
 
 # ─── Transcription ───────────────────────────────────────────────────────────
 
+_av_patched = False
+
+
+def _patch_pyav_compat() -> None:
+    """Let faster-whisper run on PyAV 19+.
+
+    faster-whisper (1.2.1 and earlier) calls ``av.open(..., metadata_errors=
+    "ignore")``; PyAV 19 removed that argument, so every transcription failed with
+    "open() got an unexpected keyword argument 'metadata_errors'". requirements
+    pin av<19, but an existing venv may already hold 19 — retry without it.
+    """
+    global _av_patched
+    if _av_patched:
+        return
+    try:
+        import av  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    original = av.open
+
+    def open_compat(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except TypeError as exc:
+            if "metadata_errors" in kwargs and "metadata_errors" in str(exc):
+                kwargs.pop("metadata_errors")
+                return original(*args, **kwargs)
+            raise
+
+    av.open = open_compat
+    _av_patched = True
+
+
 def _load_whisper(model: str, device: str, compute_type: str):
     key = (model, device, compute_type)
     with _whisper_lock:
         if key not in _whisper_models:
+            _patch_pyav_compat()
             try:
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
             except ImportError as exc:

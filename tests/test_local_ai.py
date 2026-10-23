@@ -112,6 +112,32 @@ class LocalAITest(unittest.TestCase):
         job = local_ai.wait_job(local_ai.start_job("transcribe", "x", work), 5)
         self.assertEqual((job["status"], job["error"]), ("error", "no model"))
 
+    def test_pyav_without_metadata_errors_is_tolerated(self):
+        """faster-whisper passes metadata_errors=, which PyAV 19 removed."""
+        calls = []
+
+        def strict_open(*args, **kwargs):
+            calls.append(dict(kwargs))
+            if "metadata_errors" in kwargs:
+                raise TypeError("open() got an unexpected keyword argument 'metadata_errors'")
+            return "container"
+
+        fake_av = types.SimpleNamespace(open=strict_open)
+        with mock.patch.dict(sys.modules, {"av": fake_av}), mock.patch.object(local_ai, "_av_patched", False):
+            local_ai._patch_pyav_compat()
+            patched_open = getattr(fake_av, "open")  # PyAV container open, not a file open
+            self.assertEqual(patched_open("clip.mp4", mode="r", metadata_errors="ignore"), "container")
+        self.assertEqual(calls[-1], {"mode": "r"})
+
+    def test_media_analysis_accepts_bool_layer_options(self):
+        from src.utils import media_analysis
+
+        self.assertEqual(media_analysis._layer_options(True, allow_download=True),
+                         {"enabled": True, "allow_model_download": True})
+        self.assertEqual(media_analysis._layer_options("no"), {"enabled": False})
+        self.assertEqual(media_analysis._layer_options(None), {})
+        self.assertEqual(media_analysis._layer_options({"backend": "x"}), {"backend": "x"})
+
 
 if __name__ == "__main__":
     unittest.main()

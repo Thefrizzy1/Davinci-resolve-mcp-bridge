@@ -1833,6 +1833,26 @@ def _detect_http_transcription_providers(env: Dict[str, str]) -> Dict[str, Any]:
     }
 
 
+def _layer_options(value: Any, *, allow_download: bool = False) -> Dict[str, Any]:
+    """Accept a bool/string shorthand for a layer's option dict.
+
+    Callers (and small local models especially) send ``"transcription": true``.
+    Every reader below does ``options["transcription"].get(...)``, so a bare bool
+    crashed the whole tool with "'bool' object has no attribute 'get'". True
+    means "on" — for transcription that includes allowing the one-time model
+    download, matching include_transcription=true.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    enabled = _coerce_bool(value, default=False)
+    options: Dict[str, Any] = {"enabled": enabled}
+    if enabled and allow_download:
+        options["allow_model_download"] = True
+    return options
+
+
 def detect_capabilities(env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Detect available analysis helpers without installing or downloading."""
     env = env if env is not None else os.environ
@@ -2270,8 +2290,8 @@ def build_plan(
 
     caps = capabilities or detect_capabilities()
     options = {
-        "transcription": params.get("transcription") or {},
-        "vision": params.get("vision") or {},
+        "transcription": _layer_options(params.get("transcription"), allow_download=True),
+        "vision": _layer_options(params.get("vision")),
         "marker_plan": params.get("marker_plan") or params.get("markerPlan") or {},
     }
     gaps = _required_capability_gaps(depth, options, caps)
@@ -5722,8 +5742,8 @@ async def execute_plan_async(
     output_root = plan["output_root"]["project_root"]
     os.makedirs(output_root, exist_ok=True)
     options = {
-        "transcription": params.get("transcription") or {},
-        "vision": params.get("vision") or {},
+        "transcription": _layer_options(params.get("transcription"), allow_download=True),
+        "vision": _layer_options(params.get("vision")),
         "marker_plan": params.get("marker_plan") or params.get("markerPlan") or {},
         # Thread the batch-runner's job_id (if any) into per-clip options so
         # _record_caps_usage + _check_caps_pre_call can populate the JOB scope.
