@@ -51,7 +51,7 @@ class EditionProfileTest(unittest.TestCase):
         with _env(DAVINCI_RESOLVE_MCP_EDITION="free", DAVINCI_RESOLVE_MCP_TOOLSET="resolve",
                   DAVINCI_RESOLVE_MCP_DISABLED_TOOLS="gallery"):
             hidden = ep.hidden_tools()
-            for name in ("local_ai", "motion_graphics", "knowledge", "project_manager_cloud", "gallery"):
+            for name in ("local_ai", "editor", "knowledge", "project_manager_cloud", "gallery"):
                 self.assertIn(name, hidden)
             self.assertNotIn("local_ai", ep.refusal("media_pool_item", "transcribe_audio"))
 

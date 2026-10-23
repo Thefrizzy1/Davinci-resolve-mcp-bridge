@@ -133,7 +133,6 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
     }),
     # Rendered graphics are new files; import adds them to the pool and may
     # append them to a track. render/still only write under the output dir.
-    "motion_graphics": frozenset({"import"}),
     "editor": frozenset({"import"}),
     "edit_engine": frozenset({
         "execute_selects",

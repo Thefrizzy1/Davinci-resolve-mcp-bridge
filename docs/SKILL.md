@@ -352,7 +352,7 @@ to the user as verified.
 
 | Mode | Entry point | Tool count | Use when |
 |---|---|---|---|
-| Compound (default) | `src/server.py` | 40 tools | Most workflows — keeps context lean |
+| Compound (default) | `src/server.py` | 39 tools | Most workflows — keeps context lean |
 | Granular (full) | `src/server.py --full` | 390 tools | Power users needing one tool per API method |
 
 Resolve 21.1 adds [twelve read-only discovery controls](reference/resolve211-read-controls.md)
@@ -747,7 +747,7 @@ you are on the correct page first.
 
 ### Craft Guidance
 
-**`motion_graphics`** — Remotion + Three.js templates (LowerThird, TitleCard, KineticText, Captions, Counter, EndCard, Particles3D, Text3D, Shapes3D) rendered to ProRes 4444 (alpha) or H.264 and imported into Resolve. Actions: `status`, `list_templates`, `render`, `still`, `job_status`, `cancel`, `import`, `studio`. Optional extra (`install.py --motion`); `DAVINCI_RESOLVE_MCP_MOTION_PROJECT` points it at a user's own Remotion project. See the `resolve-motion` skill.
+**Motion graphics** live in a separate MCP server, `motion-graphics` (`src/motion_server.py`, tool `motion`), which needs no Resolve: Remotion + Three.js templates (LowerThird, TitleCard, KineticText, Captions, Counter, EndCard, Particles3D, Text3D, Shapes3D) rendered to ProRes 4444 (alpha) or H.264 in ~/Videos/Resolve MCP Motion. Bring renders into Resolve with `editor(action="import", params={"folder": "renders"})`. See the `resolve-motion` skill.
 
 **`local_ai`** — Whisper transcription (`transcribe`) and local vision-model frame descriptions (`describe`, via LM Studio/Ollama), plus `analyze` (both) and `status`. Target with `path`, `clip_name` or `clip_id`. Use this instead of `host_chat_paths` vision when the chat model cannot read image files (most local models). Transcribe options: `write_srt`, `import_srt`, `add_markers`, `translate`, `model`. Long work runs in the background: a call waits up to 25 s, then returns `status: running` + `job_id`; poll `job_status(job_id)` (it waits too) until `done`. Prefer `base`/`small` models on CPU.
 

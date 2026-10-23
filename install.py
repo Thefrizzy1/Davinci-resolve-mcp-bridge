@@ -1173,6 +1173,53 @@ def write_json(path, data):
         f.write("\n")
 
 
+MOTION_SERVER_NAME = "motion-graphics"
+
+
+def write_motion_server_config(client, python_path, motion_path, dry_run=False):
+    """Register the standalone motion-graphics server next to davinci-resolve.
+
+    It needs no Resolve paths: rendering never touches Resolve. Returns
+    (success, message); an entry that already exists is left as it is.
+    """
+    config_path = client["get_path"]()
+    if config_path is None:
+        return False, f"{client['name']} is not available on {platform_name()}"
+    if client.get("format") == "toml":
+        header = f"[mcp_servers.{MOTION_SERVER_NAME}]"
+        try:
+            text = Path(config_path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        except (OSError, UnicodeDecodeError) as exc:
+            return False, f"{config_path} could not be read ({exc})"
+        if header in text:
+            return True, "already configured"
+        block = "\n".join([
+            header,
+            f"command = {_toml_basic_string(str(python_path))}",
+            f"args = [{_toml_basic_string(str(motion_path))}]",
+            "startup_timeout_sec = 60",
+            "tool_timeout_sec = 600",
+        ]) + "\n"
+        if dry_run:
+            return True, f"Would add to {config_path}:\n{block}"
+        prefix = text if not text or text.endswith("\n") else text + "\n"
+        Path(config_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(config_path).write_text(prefix + ("\n" if prefix.strip() else "") + block, encoding="utf-8")
+        return True, str(config_path)
+    entry = build_entry_for_client(client, python_path, motion_path, None, None)
+    if dry_run:
+        return True, f"Would add {MOTION_SERVER_NAME} to {config_path}"
+    try:
+        existing = read_json(config_path)
+    except ConfigParseError as exc:
+        return False, f"{config_path} could not be parsed ({exc})"
+    existing.setdefault(client["config_key"], {})[MOTION_SERVER_NAME] = entry
+    write_json(config_path, existing)
+    return True, str(config_path)
+
+
 def write_client_config(client, python_path, server_path, api_path, lib_path, dry_run=False):
     """Write or merge MCP config for a specific client. Returns (success, message)."""
     config_path = client["get_path"]()
@@ -1785,7 +1832,7 @@ def verify_resolve_connection(python_path, api_path, lib_path, bridge_only=False
 
 def print_banner():
     title = f"DaVinci Resolve MCP Server — Installer v{VERSION}"
-    subtitle = "40 compound · 390 full · local AI · bridge"
+    subtitle = "39 compound · 390 full · local AI · bridge"
     print()
     print(bold("  ╔══════════════════════════════════════════════════════╗"))
     print(bold(f"  ║{title:^54}║"))
@@ -2351,7 +2398,7 @@ def main():
     )
     parser.add_argument(
         "--toolset", choices=["lean", "resolve", "full"], default=None,
-        help="'lean' = editor + motion_graphics only (~1k tokens, best for local models); "
+        help="'lean' = the editor tool only (~700 tokens, best for local models); "
              "'resolve' = Resolve-control tools only; 'full' = everything"
     )
     parser.add_argument(
@@ -2483,8 +2530,8 @@ def main():
     if toolset is None:
         if interactive:
             print(f"\n  Which tools should the AI see?")
-            print(f"    {cyan('1')}. Lean editor       {dim('~1k tokens: the editor tool (transcribe, pick sentences, build the')}")
-            print(f"                          {dim('timeline in ~5 calls) + motion graphics. Best for LM Studio / local models.')}")
+            print(f"    {cyan('1')}. Lean editor       {dim('~700 tokens: the editor tool (transcribe, pick sentences, build the')}")
+            print(f"                          {dim('timeline in ~5 calls). Best for LM Studio / local models.')}")
             print(f"    {cyan('2')}. Resolve only      {dim('~30k tokens: every Resolve tool, no extras')}")
             print(f"    {cyan('3')}. Everything        {dim('~36k tokens: all 40 tools — for Claude/GPT-class models')}")
             try:
@@ -2711,6 +2758,9 @@ def main():
 
     configured = []
     skipped = []
+    # The motion-graphics server is its own MCP entry (no Resolve needed); add it
+    # wherever the Resolve server goes once its Node packages are installed.
+    motion_ready_now = (project_dir / "motion-graphics" / "node_modules" / "@remotion" / "renderer").is_dir()
 
     for client_id in client_ids:
         client = next((c for c in MCP_CLIENTS if c["id"] == client_id), None)
@@ -2732,6 +2782,11 @@ def main():
             else:
                 print(f"  {green('✓')} {client['name']:<28} → {dim(message)}")
                 configured.append(client["name"])
+            if motion_ready_now:
+                ok, motion_message = write_motion_server_config(
+                    client, python_path, project_dir / "src" / "motion_server.py", dry_run=args.dry_run)
+                label = f"{client['name']} + {MOTION_SERVER_NAME}"
+                print(f"  {green('✓') if ok else yellow('⊘')} {label:<28}   {dim(motion_message.splitlines()[0])}")
         else:
             print(f"  {yellow('⊘')} {client['name']:<28}   {dim(message)}")
             skipped.append(client["name"])

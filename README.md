@@ -1,7 +1,7 @@
 # DaVinci Resolve MCP Bridge
 
 [![Version](https://img.shields.io/badge/version-4.14.4-blue.svg)](CHANGELOG.md)
-[![Tools](https://img.shields.io/badge/MCP%20Tools-40%20(390%20full)-blue.svg)](#whats-what)
+[![Tools](https://img.shields.io/badge/MCP%20Tools-39%20(390%20full)-blue.svg)](#whats-what)
 [![Advanced](https://img.shields.io/badge/Advanced%20(offline)-18%20tools-blueviolet.svg)](#whats-what)
 [![Local AI](https://img.shields.io/badge/local%20AI-Whisper%20%2B%20vision-green.svg)](#local-ai-transcription-and-vision)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,7 +9,7 @@
 Control DaVinci Resolve from an AI assistant over MCP. Works with local models (LM Studio, Ollama) as well as Claude, Cursor and others. Includes a local Whisper + vision suite, so a local model can "hear" and "see" your footage without any cloud service.
 
 > This is a personal fork of [samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp) (MIT).
-> Changes in this fork: a `local_ai` tool (Whisper transcription + LM Studio/Ollama vision), a `motion_graphics` tool (Remotion + Three.js templates rendered straight into Resolve), the installer always installs the Resolve bridge, the installer can set up LM Studio directly, promo for the upstream's paid app is removed, and this README is shorter.
+> Changes in this fork: a `local_ai` tool (Whisper transcription + LM Studio/Ollama vision), a separate `motion-graphics` MCP server (Remotion + Three.js templates, no Resolve needed), the installer always installs the Resolve bridge, the installer can set up LM Studio directly, promo for the upstream's paid app is removed, and this README is shorter.
 
 ## Install
 
@@ -23,7 +23,7 @@ The installer runs these steps in order:
 
 1. Finds Resolve and asks two questions:
    - **Which edition do you have, Free or Studio?** Free means the server talks to Resolve only through the in-app bridge, never through external scripting (a Studio feature), and Studio-only actions are removed. See [Free vs Studio](#free-vs-studio).
-   - **Which tools should the AI see?** *Everything*, or *Resolve only*. Resolve only drops `local_ai`, `motion_graphics` and `knowledge`, which keeps the tool list small for local models.
+   - **Which tools should the AI see?** *Everything*, or *Resolve only*. Resolve only drops `local_ai`, `editor` and `knowledge`, which keeps the tool list small for local models.
 2. Creates a `venv/` with the dependencies.
 3. **Always installs the in-app bridge** into Resolve's `Scripts/Utility` folders. You need it on the free edition. On Studio it does no harm.
 4. Asks whether to install the **local AI extras** (faster-whisper). If you say yes, you pick a Whisper model and the installer **downloads it right away**, so the first transcription doesn't stall on a download.
@@ -47,7 +47,7 @@ python install.py --clients manual               # just print the JSON config
 
 ## Editing with a local model (the fast way)
 
-The full tool list costs about 36,000 tokens before your model reads a word, which is more than most local models can hold. Pick **Lean editor** in the installer (or run `python install.py --toolset lean`). The model then sees only the `editor` and `motion_graphics` tools, about 1,000 tokens. Replies are compact text instead of pretty-printed JSON sent twice.
+The full tool list costs about 36,000 tokens before your model reads a word, which is more than most local models can hold. Pick **Lean editor** in the installer (or run `python install.py --toolset lean`). The model then sees only the `editor` tool, about 700 tokens. If you install motion graphics, that's a separate server with one more small tool. Replies are compact text instead of pretty-printed JSON sent twice.
 
 1. **Before you chat**, with your project open in Resolve (and the bridge running on the free edition):
    `venv\Scripts\python scripts\prep_footage.py` (on macOS/Linux: `venv/bin/python scripts/prep_footage.py`)
@@ -72,10 +72,10 @@ A prompt that fits this workflow:
 
 | Part | What it is | When you need it |
 |---|---|---|
-| `src/server.py` | **Main MCP server.** 40 grouped tools (project, media pool, timeline, color, Fusion, Fairlight, render, `editor`, `local_ai`, `motion_graphics`…) | Always. This is what your client runs. |
+| `src/server.py` | **Main MCP server.** 39 grouped tools (project, media pool, timeline, color, Fusion, Fairlight, render, `editor`, `local_ai`…) | Always. This is what your client runs. |
 | `src/server.py --full` | Same server with one tool per Resolve API method (390 tools) | Only for power users. It's too many tools for small local models. |
 | `local_ai` tool | Whisper transcription and frame descriptions, all on this machine | When your model can't read audio or images itself |
-| `motion_graphics` tool + `motion-graphics/` | Remotion + Three.js templates (titles, lower thirds, captions, counters, 3D) rendered to ProRes 4444/H.264 and imported into Resolve | When you want generated graphics on the timeline (optional extra) |
+| `src/motion_server.py` + `motion-graphics/` | Separate MCP server: Remotion + Three.js templates (titles, lower thirds, captions, counters, 3D) rendered to ProRes 4444/H.264. No Resolve or bridge needed | When you want generated graphics (optional extra) |
 | Resolve bridge (`scripts/install_resolve_bridge.py`) | A small script that runs *inside* Resolve and passes commands from the server over loopback (HMAC-signed) | Free edition (required) or when external scripting is off |
 | `bin/davinci-resolve-advanced-mcp.mjs` | Optional Node server that edits `.drp/.drt/.drx` files offline, with Resolve closed | Offline project, timeline and grade file work |
 | Control panel (`venv/bin/python -m src.control_panel`) | Local browser UI for inspecting Resolve state and analysis results | Optional |
@@ -112,17 +112,19 @@ Install the extras later with `venv/bin/pip install -r requirements-local-ai.txt
 
 ## Motion graphics: Remotion + Three.js
 
-This is an optional extra. Install it with `python install.py --motion` (needs Node 18.18+). The AI picks a template, fills in the props, renders it, and drops the result onto your timeline:
+This is an optional extra. Install it with `python install.py --motion` (needs Node 18.18+).
+
+It's a **separate MCP server**, `motion-graphics` (`src/motion_server.py`), with a single tool called `motion`. **It doesn't need DaVinci Resolve or the bridge.** It starts in under a second, and its tool description is about 300 tokens. The installer adds it to each client next to `davinci-resolve`.
 
 ```text
-motion_graphics(action="list_templates")
-motion_graphics(action="render", params={"template": "LowerThird",
-    "props": {"name": "Ada Lovelace", "title": "Mathematician"},
-    "import_to_resolve": true, "track_index": 2, "at_playhead": true})
-motion_graphics(action="render", params={"template": "Captions",
-    "transcript_from": {"clip_name": "A001_C003"}, "import_to_resolve": true})
-motion_graphics(action="still", params={"template": "Text3D", "props": {"text": "SEASON 2"}})
+motion(action="list_templates")
+motion(action="still",  params={"template": "Text3D", "props": {"text": "SEASON 2"}})      # frame shown in the chat
+motion(action="render", params={"template": "LowerThird",
+    "props": {"name": "Ada Lovelace", "title": "Mathematician"}, "open": true})          # plays when done
+motion(action="job_status", params={"job_id": "..."})                                    # if it said "running"
 ```
+
+Renders are saved to `Videos/Resolve MCP Motion`. To put them in Resolve, use the Resolve server's `editor(action="import", params={"folder": "renders"})`. They then show up in `editor footage` and can be placed with `editor build`.
 
 | Template | What it is |
 |---|---|
@@ -131,8 +133,8 @@ motion_graphics(action="still", params={"template": "Text3D", "props": {"text": 
 | `Particles3D` · `Text3D` · `Shapes3D` | three.js scenes. Set `transparentBackground: true` for alpha. |
 
 - Every template accepts `durationSeconds`, `fps`, `width` and `height`.
-- `Captions` can take `segments`, an `srt_path`, or `transcript_from`. With `transcript_from` it runs `local_ai` Whisper first, then renders word-by-word subtitles.
-- Long renders return a `job_id`. Poll it with `job_status`. The import onto the timeline happens when the render finishes.
+- `Captions` takes `segments` or an `srt_path` (for example one written by `local_ai transcribe` with `write_srt`).
+- Every call replies within 20 seconds. Long renders return a `job_id`, and `job_status` waits up to 20 seconds for it. Asking for the same render again returns the same job instead of starting another. Renders run one at a time, and one that takes longer than 15 minutes is stopped with the error message.
 - `studio` opens Remotion Studio so you can preview and tweak in the browser. You can also run `cd motion-graphics && npm run studio`.
 - Claude Code and other shell tools can call the renderer directly:
   `node motion-graphics/render.mjs --template TitleCard --props '{"title":"Hi"}' --out title.mp4`

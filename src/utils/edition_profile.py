@@ -14,7 +14,7 @@ the environment variables below override the file.
 
 ``toolset = "resolve"`` (DAVINCI_RESOLVE_MCP_TOOLSET)
     Only the tools that control Resolve; the bridge's extras (local_ai,
-    motion_graphics, knowledge) are not registered. Fewer tools means a
+    knowledge, editor) are not registered. Fewer tools means a
     smaller prompt, which small local models need.
 
 ``DAVINCI_RESOLVE_MCP_DISABLED_TOOLS=a,b`` hides any further tools by name.
@@ -54,18 +54,18 @@ STUDIO_ONLY_ACTIONS: Dict[str, FrozenSet[str]] = {
 _ALTERNATIVES = {
     "transcribe_audio": "local_ai(action='transcribe') runs Whisper locally instead.",
     "create_subtitles": "local_ai(action='transcribe', params={'import_srt': true}) makes an SRT locally; "
-                        "motion_graphics Captions renders styled subtitles.",
+                        "the motion-graphics server's Captions template renders styled subtitles.",
     "subtitle_generation_probe": "local_ai(action='transcribe', params={'import_srt': true}).",
 }
 
 #: Whole tools that only drive Studio or paid services.
 STUDIO_ONLY_TOOLS: FrozenSet[str] = frozenset({"project_manager_cloud"})
 #: Tools that are this bridge's extras rather than Resolve control.
-EXTRA_TOOLS: FrozenSet[str] = frozenset({"local_ai", "motion_graphics", "knowledge", "editor"})
+EXTRA_TOOLS: FrozenSet[str] = frozenset({"local_ai", "knowledge", "editor"})
 #: The "lean" tool set: everything an edit needs in ~2k tokens of tool schema,
 #: instead of ~35k for the full surface — which alone fills a local model's
 #: context before it has read the task.
-LEAN_TOOLS: FrozenSet[str] = frozenset({"editor", "motion_graphics"})
+LEAN_TOOLS: FrozenSet[str] = frozenset({"editor"})
 
 
 def _settings() -> Dict[str, Any]:

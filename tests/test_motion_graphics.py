@@ -78,5 +78,21 @@ class HelpersTest(unittest.TestCase):
             mg.job_status("nope")
 
 
+class StandaloneServerTest(unittest.TestCase):
+    def test_motion_server_does_not_load_resolve(self):
+        """The motion server must start with no Resolve, bridge or scripting API."""
+        import subprocess
+
+        code = ("import sys; sys.argv=['x']; import src.motion_server as m; "
+                "print(sorted(m.server._tool_manager._tools), 'src.server' in sys.modules)")
+        out = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True,
+                             encoding="utf-8", stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(out.stdout.strip(), "['motion'] False", out.stderr)
+
+    def test_motion_is_not_part_of_the_resolve_server(self):
+        text = (ROOT / "src" / "server.py").read_text(encoding="utf-8")
+        self.assertNotIn("def motion_graphics(", text)
+
+
 if __name__ == "__main__":
     unittest.main()
