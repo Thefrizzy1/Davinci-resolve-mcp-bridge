@@ -108,7 +108,13 @@ def bridge_enabled() -> bool:
 
 
 class BridgeTransport:
-    """One authenticated loopback connection per request, serialised."""
+    """Authenticated loopback requests, serialised over one kept-alive connection.
+
+    Every request is still signed and authenticated on its own; keep-alive only
+    reuses the TCP connection. A bridge that predates keep-alive closes after
+    each reply and does not echo `"keepalive": true`, and the transport then
+    falls back to one connection per request.
+    """
 
     def __init__(self, config: Dict[str, Any], *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
         self.host = config["host"]
@@ -129,6 +135,8 @@ class BridgeTransport:
         # keeps request/response pairing simple and matches the _bridge_lock
         # discipline the rest of the server already follows.
         self._lock = threading.RLock()
+        self._sock: Optional[socket.socket] = None
+        self._rfile: Any = None
         #: Replies the surface reported as incomplete, newest last: one row per
         #: (method, dropped, total). Kept so a caller that suspects a short
         #: enumeration can prove it instead of inferring it from a count that
@@ -162,6 +170,71 @@ class BridgeTransport:
             "Workspace > Scripts > resolve_bridge."
         )
 
+    def close(self) -> None:
+        """Drop the kept-alive connection (the next request reconnects)."""
+        with self._lock:
+            self._drop()
+
+    def _drop(self) -> None:
+        for item in (self._rfile, self._sock):
+            try:
+                if item is not None:
+                    item.close()
+            except OSError:
+                pass
+        self._sock = None
+        self._rfile = None
+
+    def _connect(self) -> None:
+        try:
+            # A connect that times out means no bridge, never a dialog: the
+            # kernel completes the handshake even while a modal dialog blocks
+            # Resolve. Windows retries a refused loopback SYN for ~2 s, so a
+            # short timeout fires here before the refusal does (#278).
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        except OSError as exc:
+            raise self._unavailable(exc) from exc
+        sock.settimeout(self.timeout)
+        self._sock = sock
+        self._rfile = sock.makefile("rb")
+
+    def _exchange(self, payload: Dict[str, Any], line: bytes) -> bytes:
+        """Send one signed line and read one reply, reusing the connection.
+
+        A reused connection the bridge has since closed (idle limit, restart,
+        older bridge) fails before the request is read, so that one case is
+        retried once on a fresh connection. Anything after the request may have
+        been processed — a timeout — is never retried.
+        """
+        for attempt in (0, 1):
+            reused = self._sock is not None
+            if not reused:
+                self._connect()
+            try:
+                self._sock.sendall(line)
+                raw = self._rfile.readline(_bridge.MAX_REQUEST_BYTES + 1)
+            except (TimeoutError, socket.timeout) as exc:
+                self._drop()
+                raise BridgeCallError(
+                    "bridge_timeout",
+                    "Resolve did not answer in time — check for an open modal dialog, "
+                    "which blocks its scripting API entirely",
+                ) from exc
+            except OSError as exc:
+                self._drop()
+                if reused and attempt == 0:
+                    continue
+                raise self._unavailable(exc) from exc
+            if not raw:
+                self._drop()
+                if reused and attempt == 0:
+                    continue
+                return raw
+            if b'"keepalive":true' not in raw:
+                self._drop()  # older bridge, or it chose to close: reconnect next time
+            return raw
+        return b""
+
     def request(self, operation: str, arguments: Dict[str, Any]) -> Any:
         payload = {
             "protocol": _bridge.PROTOCOL_VERSION,
@@ -170,6 +243,7 @@ class BridgeTransport:
             "nonce": secrets.token_urlsafe(24),
             "operation": operation,
             "arguments": arguments,
+            "keepalive": True,
         }
         payload["signature"] = _bridge.sign_request(self._token, payload)
         line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
@@ -177,27 +251,7 @@ class BridgeTransport:
             raise BridgeCallError("request_too_large", "request exceeds the bridge limit")
 
         with self._lock:
-            try:
-                # A connect that times out means no bridge, never a dialog: the
-                # kernel completes the handshake even while a modal dialog blocks
-                # Resolve. Windows retries a refused loopback SYN for ~2 s, so a
-                # short timeout fires here before the refusal does (#278).
-                sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
-            except OSError as exc:
-                raise self._unavailable(exc) from exc
-            try:
-                with sock:
-                    sock.settimeout(self.timeout)
-                    sock.sendall(line)
-                    raw = sock.makefile("rb").readline(_bridge.MAX_REQUEST_BYTES + 1)
-            except (TimeoutError, socket.timeout) as exc:
-                raise BridgeCallError(
-                    "bridge_timeout",
-                    "Resolve did not answer in time — check for an open modal dialog, "
-                    "which blocks its scripting API entirely",
-                ) from exc
-            except OSError as exc:
-                raise self._unavailable(exc) from exc
+            raw = self._exchange(payload, line)
 
         if not raw:
             raise BridgeCallError("bridge_protocol_error", "bridge closed without replying")

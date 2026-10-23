@@ -124,6 +124,10 @@ motion_graphics(action="still", params={"template": "Text3D", "props": {"text": 
 | `DAVINCI_RESOLVE_MCP_MOTION_BROWSER` | Path to a Chrome or Chromium binary, if Remotion's download is blocked |
 | `DAVINCI_RESOLVE_MCP_MOTION_GL` | WebGL backend: `angle` (default on Mac and Windows), `swangle` (default on Linux), `egl` or `vulkan` |
 
+## Codex
+
+`python install.py --clients codex` writes `[mcp_servers.davinci-resolve]` into `~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows). It includes `startup_timeout_sec = 120` and `tool_timeout_sec = 600`. Codex's defaults are 10 s and 60 s, which is too short for this server to start, especially on Windows. When a server doesn't start in time, Codex drops it silently and the tools just don't appear. On Windows the entry also passes `SYSTEMROOT`, `APPDATA` and similar variables, because Codex starts servers with a trimmed environment. Values you've set yourself in that table are kept. After installing, restart Codex and open a **new** chat.
+
 ## LM Studio tips
 
 - The installer adds the server as `davinci-resolve` to `~/.lmstudio/mcp.json`. Any other servers already in that file stay as they are. Restart LM Studio after installing.
@@ -146,7 +150,7 @@ The choice is saved in `~/.config/davinci-resolve-mcp/profile.json`. Re-run the 
 
 ## Free edition (in-app bridge)
 
-Blackmagic only allows *external* scripting on Studio. The bridge is a small script that runs inside Resolve (Workspace ▸ Scripts ▸ resolve_bridge) and passes commands from the server over loopback, using HMAC-signed requests with one-time nonces. `install.py` always installs it. To reinstall it by hand, run `python scripts/install_resolve_bridge.py`. Once it's running, the server uses it automatically. Set `DAVINCI_RESOLVE_BRIDGE=1` to force the server to use only the bridge.
+Blackmagic only allows *external* scripting on Studio. The bridge is a small script that runs inside Resolve (Workspace ▸ Scripts ▸ resolve_bridge) and passes commands from the server over loopback, using HMAC-signed requests with one-time nonces. `install.py` always installs it. To reinstall it by hand, run `python scripts/install_resolve_bridge.py`. Once it's running, the server uses it automatically. Set `DAVINCI_RESOLVE_BRIDGE=1` to force the server to use only the bridge. The connection to the bridge is kept open between requests. Older versions opened a new connection for every API call, and on Windows a busy session ran out of ports and the bridge seemed to "die". **After updating, run `python install.py` (or `python scripts/install_resolve_bridge.py`) again and restart the bridge in Resolve** so the copy inside Resolve is updated too.
 
 ## Things to know
 

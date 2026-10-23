@@ -721,18 +721,39 @@ _CODEX_ENV_TABLE = re.compile(
 )
 
 
+#: Codex gives an MCP server 10 s to start and 60 s per tool call by default.
+#: This server imports a large module tree and can take longer than 10 s to
+#: come up (Windows especially), and Codex then drops it without telling the
+#: chat — the tools simply never appear. Defaults only: a value the user has
+#: already set in the table is kept.
+CODEX_TIMEOUT_DEFAULTS = {"startup_timeout_sec": 120, "tool_timeout_sec": 600}
+
+
+#: Codex starts MCP servers with a trimmed environment. On Windows that drops
+#: variables Python and this server rely on: SYSTEMROOT (without it CPython's
+#: socket and random modules fail — the bridge is a socket), the app-data roots
+#: used to find Resolve and the bridge config, and the temp dirs.
+CODEX_WINDOWS_PASSTHROUGH = ("SYSTEMROOT", "WINDIR", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+                             "USERPROFILE", "TEMP", "TMP")
+
+
 def build_codex_entry(python_path, server_path, api_path, lib_path, system=SYSTEM, python_home=None):
     """Build the Codex server entry as data, before it is rendered to TOML."""
+    env = build_server_env(python_path, api_path, lib_path, system=system, python_home=python_home)
+    if system == "Windows":
+        for key in CODEX_WINDOWS_PASSTHROUGH:
+            value = os.environ.get(key)
+            if value and key not in env:
+                env[key] = value
     return {
         "command": str(python_path),
         "args": [str(server_path)],
-        "env": build_server_env(
-            python_path, api_path, lib_path, system=system, python_home=python_home
-        ),
+        "timeouts": dict(CODEX_TIMEOUT_DEFAULTS),
+        "env": env,
     }
 
 
-def render_codex_table(entry, env_as_subtable=False):
+def render_codex_table(entry, env_as_subtable=False, skip_keys=()):
     """Render a Codex entry as a ``[mcp_servers.davinci-resolve]`` table.
 
     ``env`` goes in an inline table by default -- the shape ``codex mcp add``
@@ -747,6 +768,9 @@ def render_codex_table(entry, env_as_subtable=False):
         f"command = {_toml_basic_string(entry['command'])}",
         f"args = [{args}]",
     ]
+    for key, value in (entry.get("timeouts") or {}).items():
+        if key not in skip_keys:
+            lines.append(f"{key} = {int(value)}")
     env = entry.get("env") or {}
     if env and not env_as_subtable:
         inner = ", ".join(f"{key} = {_toml_basic_string(value)}" for key, value in env.items())
@@ -916,11 +940,16 @@ def merge_codex_toml(existing_text, entry):
 
     env_child = next((i for i, line in enumerate(children) if _CODEX_ENV_TABLE.match(line)), None)
 
-    rebuilt = render_codex_table(entry, env_as_subtable=env_child is not None).rstrip("\n").split("\n")
+    kept = _drop_managed_codex_keys(direct)
+    user_keys = {m.group(1) for m in (re.match(r"\s*([A-Za-z0-9_]+)\s*=", line) for line in kept) if m}
+    rebuilt = render_codex_table(
+        entry, env_as_subtable=env_child is not None, skip_keys=user_keys,
+    ).rstrip("\n").split("\n")
     # Everything in the table that is not command/args/env stays: Codex's own
     # per-server knobs (startup_timeout_sec, tool_timeout_sec, ...) plus the
-    # user's comments and blank lines.
-    rebuilt += _drop_managed_codex_keys(direct)
+    # user's comments and blank lines. Our timeout defaults are only written
+    # when the user has not set that key.
+    rebuilt += kept
 
     if env_child is not None:
         env_end = len(children)

@@ -95,6 +95,18 @@ PREAUTH_READ_TIMEOUT_S = 5.0
 MAX_CONCURRENT_CONNECTIONS = 16
 #: Post-auth: a real Resolve call can be slow, but not unbounded.
 OPERATION_TIMEOUT_S = 300.0
+#: Keep-alive. A client that sets `"keepalive": true` may send further requests
+#: on the same connection; each is authenticated on its own exactly like a new
+#: connection. Without this every API call was a fresh TCP connection, and a
+#: busy session (hundreds of calls per tool) exhausted Windows' ephemeral ports
+#: through TIME_WAIT — after which every call failed with "cannot reach the
+#: bridge" until the sockets aged out. Only an AUTHENTICATED connection is kept;
+#: an idle one is closed so it cannot hold a slot.
+KEEPALIVE_IDLE_S = 30.0
+KEEPALIVE_MAX_REQUESTS = 100_000
+#: Error codes that mean the request never authenticated — never keep those.
+_AUTH_FAILURES = frozenset({"invalid_request", "protocol_mismatch", "unauthorized",
+                            "stale_request", "replayed_request"})
 
 #: How a running bridge may be asked to stop. `exit` leaves nothing listening;
 #: `reload` asks the launcher to re-import the runtime and start again.
@@ -519,21 +531,61 @@ class _Handler(socketserver.StreamRequestHandler):
             return
         try:
             self.request.settimeout(PREAUTH_READ_TIMEOUT_S)
-            line = self.rfile.readline(MAX_REQUEST_BYTES + 1)
-            if len(line) > MAX_REQUEST_BYTES:
-                self._write({"ok": False, "error": {"code": "request_too_large"}})
-                return
-            if not line:
-                return
-            try:
-                request = json.loads(line.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                self._write({"ok": False, "error": {"code": "invalid_json"}})
-                return
-            self.request.settimeout(OPERATION_TIMEOUT_S)
-            self._write(bridge.process(request))
+            served = 0
+            while True:
+                if served and not self._wait_for_next_request(bridge):
+                    return
+                line = self.rfile.readline(MAX_REQUEST_BYTES + 1)
+                if len(line) > MAX_REQUEST_BYTES:
+                    self._write({"ok": False, "error": {"code": "request_too_large"}})
+                    return
+                if not line:
+                    return
+                try:
+                    request = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    self._write({"ok": False, "error": {"code": "invalid_json"}})
+                    return
+                self.request.settimeout(OPERATION_TIMEOUT_S)
+                response = bridge.process(request)
+                served += 1
+                code = (response.get("error") or {}).get("code") if not response.get("ok") else None
+                keep = (
+                    isinstance(request, dict) and request.get("keepalive") is True
+                    and code not in _AUTH_FAILURES
+                    and served < KEEPALIVE_MAX_REQUESTS
+                    and not bridge.stopping
+                )
+                if keep:
+                    response = {**response, "keepalive": True}
+                self._write(response)
+                if not keep:
+                    return
+        except (OSError, socket.timeout):
+            return  # client went away or stalled mid-request; nothing to answer
         finally:
             bridge.release_slot()
+
+    def _wait_for_next_request(self, bridge: "Bridge") -> bool:
+        """Idle between keep-alive requests without blocking a stop.
+
+        Polls in short steps so a requested stop (or the idle limit) closes the
+        connection promptly and `_drain` can reclaim its slot.
+        """
+        deadline = time.monotonic() + KEEPALIVE_IDLE_S
+        while time.monotonic() < deadline:
+            if bridge.stopping:
+                return False
+            self.request.settimeout(0.5)
+            try:
+                # Peek, so the bytes stay for rfile.readline to consume whole.
+                if not self.request.recv(1, socket.MSG_PEEK):
+                    return False  # client closed
+            except socket.timeout:
+                continue
+            self.request.settimeout(OPERATION_TIMEOUT_S)
+            return True
+        return False
 
     def _write(self, payload: Dict[str, Any]) -> None:
         self.wfile.write((json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
@@ -643,6 +695,10 @@ class Bridge:
     @property
     def stop_mode(self) -> Optional[str]:
         return self._stop_mode
+
+    @property
+    def stopping(self) -> bool:
+        return self._stop_event.is_set()
 
     def _drain(self, timeout: float) -> bool:
         """Wait until no handler is in flight, so replies are already on the wire.
